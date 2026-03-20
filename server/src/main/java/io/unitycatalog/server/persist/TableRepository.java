@@ -5,9 +5,11 @@ import io.unitycatalog.server.exception.ErrorCode;
 import io.unitycatalog.server.model.ColumnInfo;
 import io.unitycatalog.server.model.CreateTable;
 import io.unitycatalog.server.model.DataSourceFormat;
+import io.unitycatalog.server.model.DependencyList;
 import io.unitycatalog.server.model.ListTablesResponse;
 import io.unitycatalog.server.model.TableInfo;
 import io.unitycatalog.server.model.TableType;
+import io.unitycatalog.server.persist.dao.DependencyDAO;
 import io.unitycatalog.server.persist.dao.PropertyDAO;
 import io.unitycatalog.server.persist.dao.SchemaInfoDAO;
 import io.unitycatalog.server.persist.dao.StagingTableDAO;
@@ -151,6 +153,16 @@ public class TableRepository {
           TableInfo tableInfo = tableInfoDAO.toTableInfo(true, catalogName, schemaName);
           RepositoryUtils.attachProperties(
               tableInfo, tableInfo.getTableId(), Constants.TABLE, session);
+          if ("METRIC_VIEW".equals(tableInfoDAO.getType())) {
+            List<DependencyDAO> deps =
+                repositories
+                    .getDependencyRepository()
+                    .getDependencies(session, tableInfoDAO.getId(), "TABLE");
+            if (!deps.isEmpty()) {
+              tableInfo.setViewDependencies(
+                  new DependencyList().dependencies(DependencyDAO.toDependencyList(deps)));
+            }
+          }
           return tableInfo;
         },
         "Failed to get table",
@@ -174,9 +186,11 @@ public class TableRepository {
     ValidationUtils.validateSqlObjectName(createTable.getName());
     String callerId = IdentityUtils.findPrincipalEmailAddress();
     List<ColumnInfo> columnInfos =
-        createTable.getColumns().stream()
-            .map(c -> c.typeText(c.getTypeText().toLowerCase(Locale.ROOT)))
-            .collect(Collectors.toList());
+        createTable.getColumns() != null
+            ? createTable.getColumns().stream()
+                .map(c -> c.typeText(c.getTypeText().toLowerCase(Locale.ROOT)))
+                .collect(Collectors.toList())
+            : List.of();
     Long createTime = System.currentTimeMillis();
     String fullName = getTableFullName(createTable);
     LOGGER.debug("Creating table: {}", fullName);
@@ -190,7 +204,6 @@ public class TableRepository {
               repositories
                   .getSchemaRepository()
                   .getSchemaIdOrThrow(session, catalogName, schemaName);
-          NormalizedURL storageLocation = NormalizedURL.from(createTable.getStorageLocation());
 
           // Check if table already exists
           TableInfoDAO existingTable =
@@ -200,13 +213,14 @@ public class TableRepository {
                 ErrorCode.TABLE_ALREADY_EXISTS, "Table already exists: " + fullName);
           }
           TableType tableType = Objects.requireNonNull(createTable.getTableType());
-          // The table ID will either be a new random one or the id of staging table, depending
-          // on the type of table to create.
           String tableID;
+          NormalizedURL storageLocation;
           if (tableType == TableType.EXTERNAL) {
+            storageLocation = NormalizedURL.from(createTable.getStorageLocation());
             ExternalLocationUtils.validateNotOverlapWithManagedStorage(session, storageLocation);
             tableID = UUID.randomUUID().toString();
           } else if (tableType == TableType.MANAGED) {
+            storageLocation = NormalizedURL.from(createTable.getStorageLocation());
             serverProperties.checkManagedTableEnabled();
             if (createTable.getDataSourceFormat() != DataSourceFormat.DELTA) {
               throw new BaseException(
@@ -219,6 +233,26 @@ public class TableRepository {
                     .getStagingTableRepository()
                     .commitStagingTable(session, callerId, storageLocation);
             tableID = stagingTableDAO.getId().toString();
+          } else if (tableType == TableType.METRIC_VIEW) {
+            if (createTable.getViewDefinition() == null
+                || createTable.getViewDefinition().isEmpty()) {
+              throw new BaseException(
+                  ErrorCode.INVALID_ARGUMENT, "view_definition is required for metric view");
+            }
+            storageLocation = null;
+            tableID = UUID.randomUUID().toString();
+            // Persist view dependencies
+            DependencyList viewDeps = createTable.getViewDependencies();
+            if (viewDeps != null && viewDeps.getDependencies() != null) {
+              UUID tableUUID = UUID.fromString(tableID);
+              List<DependencyDAO> depDAOs =
+                  viewDeps.getDependencies().stream()
+                      .map(dep -> DependencyDAO.from(dep, tableUUID, "TABLE"))
+                      .collect(Collectors.toList());
+              repositories
+                  .getDependencyRepository()
+                  .createDependencies(session, tableUUID, "TABLE", depDAOs);
+            }
           } else if (tableType == TableType.STREAMING_TABLE) {
             throw new BaseException(
                 ErrorCode.INVALID_ARGUMENT, "STREAMING TABLE creation is not supported yet.");
@@ -245,18 +279,21 @@ public class TableRepository {
                   .createdBy(callerId)
                   .updatedAt(createTime)
                   .updatedBy(callerId)
-                  .storageLocation(storageLocation.toString())
+                  .storageLocation(storageLocation != null ? storageLocation.toString() : null)
+                  .viewDefinition(createTable.getViewDefinition())
                   .tableId(tableID);
 
           TableInfoDAO tableInfoDAO = TableInfoDAO.from(tableInfo, schemaId);
           // create columns
-          tableInfoDAO
-              .getColumns()
-              .forEach(
-                  c -> {
-                    c.setId(UUID.randomUUID());
-                    c.setTable(tableInfoDAO);
-                  });
+          if (tableInfoDAO.getColumns() != null) {
+            tableInfoDAO
+                .getColumns()
+                .forEach(
+                    c -> {
+                      c.setId(UUID.randomUUID());
+                      c.setTable(tableInfoDAO);
+                    });
+          }
           // create properties
           PropertyDAO.from(tableInfo.getProperties(), tableInfoDAO.getId(), Constants.TABLE)
               .forEach(session::persist);
@@ -265,6 +302,11 @@ public class TableRepository {
         },
         "Error creating table: " + fullName,
         /* readOnly = */ false);
+  }
+
+  /** Retrieves a TableInfoDAO by its ID within an existing session/transaction. */
+  public TableInfoDAO getTableById(Session session, UUID tableId) {
+    return session.get(TableInfoDAO.class, tableId);
   }
 
   public TableInfoDAO findBySchemaIdAndName(Session session, UUID schemaId, String name) {
@@ -383,6 +425,11 @@ public class TableRepository {
       repositories
           .getDeltaCommitRepository()
           .permanentlyDeleteTableCommits(session, tableInfoDAO.getId());
+    }
+    if ("METRIC_VIEW".equals(tableInfoDAO.getType())) {
+      repositories
+          .getDependencyRepository()
+          .deleteDependencies(session, tableInfoDAO.getId(), "TABLE");
     }
     PropertyRepository.findProperties(session, tableInfoDAO.getId(), Constants.TABLE)
         .forEach(session::remove);
