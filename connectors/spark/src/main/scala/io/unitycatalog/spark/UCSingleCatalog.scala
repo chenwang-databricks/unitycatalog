@@ -18,7 +18,7 @@ import org.apache.spark.sql.connector.catalog._
 import org.apache.spark.sql.connector.expressions.Transform
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
-import org.sparkproject.guava.base.Preconditions
+import com.google.common.base.Preconditions
 
 import java.net.URI
 import java.util
@@ -105,6 +105,14 @@ class UCSingleCatalog
       partitions: Array[Transform],
       properties: util.Map[String, String]): Table = {
     UCSingleCatalog.checkUnsupportedNestedNamespace(ident.namespace())
+
+    if ("METRIC_VIEW".equals(properties.get("table_type"))) {
+      val schema = StructType(columns.map { col =>
+        StructField(col.name(), col.dataType(), col.nullable())
+      })
+      return delegate.createTable(ident, schema, Array.empty[Transform], properties)
+    }
+
     val hasExternalClause = properties.containsKey(TableCatalog.PROP_EXTERNAL)
     val hasLocationClause = properties.containsKey(TableCatalog.PROP_LOCATION)
     if (hasExternalClause && !hasLocationClause) {
@@ -582,6 +590,11 @@ private class UCProxy(
       case e: ApiException if e.getCode == 404 =>
         throw new NoSuchTableException(ident)
     }
+
+    if (t.getTableType == TableType.METRIC_VIEW) {
+      return loadMetricView(t, ident)
+    }
+
     val identifier = TableIdentifier(t.getName, Some(t.getSchemaName), Some(t.getCatalogName))
     val partitionCols = scala.collection.mutable.ArrayBuffer.empty[(String, Int)]
     val fields = t.getColumns.asScala.map { col =>
@@ -594,25 +607,23 @@ private class UCProxy(
     val locationUri = CatalogUtils.stringToURI(t.getStorageLocation)
     val tableId = t.getTableId
     var tableOp = TableOperation.READ_WRITE
+    val credRequest = new GenerateTemporaryTableCredential().tableId(tableId).operation(tableOp)
+    // If resolving a source table through a metric view, pass the view as dependent
+    MetricViewContext.get().foreach { viewId =>
+      credRequest.setDependent(viewId)
+      MetricViewContext.clear()
+    }
     val temporaryCredentials = {
       try {
-        temporaryCredentialsApi
-          .generateTemporaryTableCredentials(
-            // TODO: at this time, we don't know if the table will be read or written. For now we always
-            //       request READ_WRITE credentials as the server doesn't distinguish between READ and
-            //       READ_WRITE credentials as of today. When loading a table, Spark should tell if it's
-            //       for read or write, we can request the proper credential after fixing Spark.
-            new GenerateTemporaryTableCredential().tableId(tableId).operation(tableOp)
-          )
-      }       catch {
+        temporaryCredentialsApi.generateTemporaryTableCredentials(credRequest)
+      } catch {
         case e: ApiException =>
           logWarning(s"READ_WRITE credential generation failed for table $identifier: ${e.getMessage}")
           try {
             tableOp = TableOperation.READ
-            temporaryCredentialsApi
-              .generateTemporaryTableCredentials(
-                new GenerateTemporaryTableCredential().tableId(tableId).operation(tableOp)
-              )
+            val readCredRequest = new GenerateTemporaryTableCredential()
+              .tableId(tableId).operation(tableOp)
+            temporaryCredentialsApi.generateTemporaryTableCredentials(readCredRequest)
           } catch {
             case e: ApiException =>
               logWarning(s"READ credential generation failed for table $identifier: ${e.getMessage}")
@@ -658,17 +669,94 @@ private class UCProxy(
       tracksPartitionsInCatalog = false,
       partitionColumnNames = partitionCols.sortBy(_._2).map(_._1).toSeq
     )
-    // Spark separates table lookup and data source resolution. To support Spark native data
-    // sources, here we return the `V1Table` which only contains the table metadata. Spark will
-    // resolve the data source and create scan node later.
     Class.forName("org.apache.spark.sql.connector.catalog.V1Table")
       .getDeclaredConstructor(classOf[CatalogTable])
       .newInstance(sparkTable)
       .asInstanceOf[Table]
   }
 
+  private def loadMetricView(t: TableInfo, ident: Identifier): Table = {
+    val identifier = TableIdentifier(t.getName, Some(t.getSchemaName), Some(t.getCatalogName))
+    val fields = if (t.getColumns != null) {
+      t.getColumns.asScala.map { col =>
+        StructField(col.getName, DataType.fromDDL(col.getTypeText), col.getNullable)
+          .withComment(col.getComment)
+      }.toArray
+    } else {
+      Array.empty[StructField]
+    }
+
+    MetricViewContext.set(t.getTableId)
+
+    val props = Option(t.getProperties).map(_.asScala.toMap).getOrElse(Map.empty) +
+      ("view.viewWithMetrics" -> "true")
+
+    val sparkTable = CatalogTable(
+      identifier,
+      tableType = CatalogTableType.VIEW,
+      storage = CatalogStorageFormat.empty,
+      schema = StructType(fields),
+      viewText = Some(t.getViewDefinition),
+      viewOriginalText = Some(t.getViewDefinition),
+      properties = props,
+      tracksPartitionsInCatalog = false
+    )
+    Class.forName("org.apache.spark.sql.connector.catalog.V1Table")
+      .getDeclaredConstructor(classOf[CatalogTable])
+      .newInstance(sparkTable)
+      .asInstanceOf[Table]
+  }
+
+  private def createMetricView(
+      ident: Identifier, schema: StructType,
+      properties: util.Map[String, String]): Table = {
+    val ct = new CreateTable()
+    ct.setName(ident.name())
+    ct.setSchemaName(ident.namespace().head)
+    ct.setCatalogName(this.name)
+    ct.setTableType(TableType.METRIC_VIEW)
+    ct.setViewDefinition(properties.get("view_definition"))
+    Option(properties.get("comment")).foreach(ct.setComment(_))
+
+    val columns: Seq[ColumnInfo] = schema.fields.toSeq.zipWithIndex.map { case (field, i) =>
+      val column = new ColumnInfo()
+      column.setName(field.name)
+      field.getComment().foreach(column.setComment(_))
+      column.setNullable(field.nullable)
+      column.setTypeText(field.dataType.catalogString)
+      column.setTypeName(convertDataTypeToTypeName(field.dataType))
+      column.setTypeJson(field.dataType.json)
+      column.setPosition(i)
+      column
+    }
+    ct.setColumns(columns.asJava)
+
+    // Dependencies are extracted by Spark and passed as the view.dependency property
+    Option(properties.get("view.dependency")).foreach { depFullName =>
+      val dep = new Dependency()
+      dep.setTable(new TableDependency().tableFullName(depFullName))
+      val depList = new DependencyList()
+      depList.setDependencies(java.util.List.of(dep))
+      ct.setViewDependencies(depList)
+    }
+
+    val serverProps = properties.asScala
+      .filterKeys(!Set("table_type", "view_definition", "comment", "view.dependency",
+        "provider").contains(_))
+      .toMap.asJava
+    ct.setProperties(serverProps)
+
+    tablesApi.createTable(ct)
+    loadTable(ident)
+  }
+
   override def createTable(ident: Identifier, schema: StructType, partitions: Array[Transform], properties: util.Map[String, String]): Table = {
     UCSingleCatalog.checkUnsupportedNestedNamespace(ident.namespace())
+
+    if ("METRIC_VIEW".equals(properties.get("table_type"))) {
+      return createMetricView(ident, schema, properties)
+    }
+
     UCSingleCatalog.requireProviderSpecified("CREATE TABLE", properties)
 
     val createTable = new CreateTable()

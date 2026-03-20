@@ -3,6 +3,8 @@ package io.unitycatalog.spark.auth.storage;
 import static io.unitycatalog.server.utils.TestUtils.createApiClient;
 import static org.assertj.core.api.AssertionsForClassTypes.assertThat;
 
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Iterators;
 import io.delta.tables.DeltaTable;
 import io.unitycatalog.client.internal.Clock;
 import io.unitycatalog.client.model.CreateCatalog;
@@ -41,8 +43,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.sparkproject.guava.collect.ImmutableList;
-import org.sparkproject.guava.collect.Iterators;
 
 /**
  * Integration test to verify that cloud vendor credential renewal works as expected.

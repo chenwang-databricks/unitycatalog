@@ -594,6 +594,10 @@ lazy val spark = (project in file("connectors/spark"))
         lombokPath
       )
     },
+    Compile / unmanagedJars ++= {
+      val sparkAssemblyDir = sys.props.get("sparkAssemblyDir").map(file).filter(_.exists)
+      sparkAssemblyDir.toSeq.flatMap(d => (d ** "*.jar").get.classpath)
+    },
     libraryDependencies ++= Seq(
       "org.apache.spark" %% "spark-sql" % sparkVersion % Provided,
       "com.fasterxml.jackson.core" % "jackson-databind" % "2.15.0",

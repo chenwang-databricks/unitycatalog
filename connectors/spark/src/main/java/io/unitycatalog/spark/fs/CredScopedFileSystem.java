@@ -1,13 +1,13 @@
 package io.unitycatalog.spark.fs;
 
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import java.io.IOException;
 import java.net.URI;
 import java.util.concurrent.ExecutionException;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FilterFileSystem;
-import org.sparkproject.guava.cache.Cache;
-import org.sparkproject.guava.cache.CacheBuilder;
 
 /**
  * A Hadoop {@link FileSystem} wrapper that enables multiple credential scopes to coexist within a

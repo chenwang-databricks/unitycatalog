@@ -1,12 +1,12 @@
 package io.unitycatalog.spark.auth.storage;
 
 import com.google.cloud.hadoop.util.AccessTokenProvider;
+import com.google.common.base.Preconditions;
 import io.unitycatalog.client.model.GcpOauthToken;
 import io.unitycatalog.spark.UCHadoopConf;
 import java.io.IOException;
 import java.time.Instant;
 import org.apache.hadoop.conf.Configuration;
-import org.sparkproject.guava.base.Preconditions;
 
 public class GcsVendedTokenProvider extends GenericCredentialProvider
     implements AccessTokenProvider {
