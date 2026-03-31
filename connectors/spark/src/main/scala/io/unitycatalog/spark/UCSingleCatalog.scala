@@ -101,17 +101,22 @@ class UCSingleCatalog
 
   override def createTable(
       ident: Identifier,
+      tableInfo: org.apache.spark.sql.connector.catalog.TableInfo): Table = {
+    UCSingleCatalog.checkUnsupportedNestedNamespace(ident.namespace())
+    val tableType = tableInfo.tableType()
+    if (TableSummary.METRIC_VIEW_TABLE_TYPE.equals(tableType)) {
+      return delegate.asInstanceOf[UCProxy].createMetricViewFromTableInfo(
+        ident, this.name, tableInfo)
+    }
+    super.createTable(ident, tableInfo)
+  }
+
+  override def createTable(
+      ident: Identifier,
       columns: Array[Column],
       partitions: Array[Transform],
       properties: util.Map[String, String]): Table = {
     UCSingleCatalog.checkUnsupportedNestedNamespace(ident.namespace())
-
-    if ("METRIC_VIEW".equals(properties.get("table_type"))) {
-      val schema = StructType(columns.map { col =>
-        StructField(col.name(), col.dataType(), col.nullable())
-      })
-      return delegate.createTable(ident, schema, Array.empty[Transform], properties)
-    }
 
     val hasExternalClause = properties.containsKey(TableCatalog.PROP_EXTERNAL)
     val hasLocationClause = properties.containsKey(TableCatalog.PROP_LOCATION)
@@ -127,8 +132,6 @@ class UCSingleCatalog
       val newProps = prepareExternalTableProperties(properties)
       delegate.createTable(ident, columns, partitions, newProps)
     } else {
-      // TODO: for path-based tables, Spark should generate a location property using the qualified
-      //       path string.
       delegate.createTable(ident, columns, partitions, properties)
     }
   }
@@ -609,9 +612,8 @@ private class UCProxy(
     var tableOp = TableOperation.READ_WRITE
     val credRequest = new GenerateTemporaryTableCredential().tableId(tableId).operation(tableOp)
     // If resolving a source table through a metric view, pass the view as dependent
-    MetricViewContext.get().foreach { viewId =>
+    org.apache.spark.sql.catalyst.analysis.AnalysisContext.get.metricViewId.foreach { viewId =>
       credRequest.setDependent(viewId)
-      MetricViewContext.clear()
     }
     val temporaryCredentials = {
       try {
@@ -686,14 +688,13 @@ private class UCProxy(
       Array.empty[StructField]
     }
 
-    MetricViewContext.set(t.getTableId)
+    org.apache.spark.sql.catalyst.analysis.AnalysisContext.setMetricViewId(t.getTableId)
 
-    val props = Option(t.getProperties).map(_.asScala.toMap).getOrElse(Map.empty) +
-      ("view.viewWithMetrics" -> "true")
+    val props = Option(t.getProperties).map(_.asScala.toMap).getOrElse(Map.empty)
 
     val sparkTable = CatalogTable(
       identifier,
-      tableType = CatalogTableType.VIEW,
+      tableType = CatalogTableType.METRIC_VIEW,
       storage = CatalogStorageFormat.empty,
       schema = StructType(fields),
       viewText = Some(t.getViewDefinition),
@@ -707,42 +708,58 @@ private class UCProxy(
       .asInstanceOf[Table]
   }
 
-  private def createMetricView(
-      ident: Identifier, schema: StructType,
-      properties: util.Map[String, String]): Table = {
+  /**
+   * Creates a metric view using structured fields from Spark's TableInfo.
+   * Called by UCSingleCatalog when tableInfo.tableType() is METRIC_VIEW.
+   */
+  def createMetricViewFromTableInfo(
+      ident: Identifier,
+      catalogName: String,
+      tableInfo: org.apache.spark.sql.connector.catalog.TableInfo): Table = {
     val ct = new CreateTable()
     ct.setName(ident.name())
     ct.setSchemaName(ident.namespace().head)
-    ct.setCatalogName(this.name)
+    ct.setCatalogName(catalogName)
     ct.setTableType(TableType.METRIC_VIEW)
-    ct.setViewDefinition(properties.get("view_definition"))
-    Option(properties.get("comment")).foreach(ct.setComment(_))
+    ct.setViewDefinition(tableInfo.viewDefinition())
+    Option(tableInfo.properties().get("comment")).foreach(ct.setComment(_))
 
-    val columns: Seq[ColumnInfo] = schema.fields.toSeq.zipWithIndex.map { case (field, i) =>
+    val columns: Seq[ColumnInfo] = tableInfo.columns().toSeq.zipWithIndex.map { case (col, i) =>
       val column = new ColumnInfo()
-      column.setName(field.name)
-      field.getComment().foreach(column.setComment(_))
-      column.setNullable(field.nullable)
-      column.setTypeText(field.dataType.catalogString)
-      column.setTypeName(convertDataTypeToTypeName(field.dataType))
-      column.setTypeJson(field.dataType.json)
+      column.setName(col.name())
+      column.setNullable(col.nullable())
+      column.setTypeText(col.dataType().catalogString)
+      column.setTypeName(convertDataTypeToTypeName(col.dataType()))
+      column.setTypeJson(col.dataType().json)
       column.setPosition(i)
       column
     }
     ct.setColumns(columns.asJava)
 
-    // Dependencies are extracted by Spark and passed as the view.dependency property
-    Option(properties.get("view.dependency")).foreach { depFullName =>
-      val dep = new Dependency()
-      dep.setTable(new TableDependency().tableFullName(depFullName))
-      val depList = new DependencyList()
-      depList.setDependencies(java.util.List.of(dep))
-      ct.setViewDependencies(depList)
+    Option(tableInfo.viewDependencies()).foreach { sparkDepList =>
+      val ucDepList = new io.unitycatalog.client.model.DependencyList()
+      val ucDeps = sparkDepList.dependencies().map { dep =>
+        val ucDep = new io.unitycatalog.client.model.Dependency()
+        dep match {
+          case td: org.apache.spark.sql.connector.catalog.TableDependency =>
+            ucDep.setTable(
+              new io.unitycatalog.client.model.TableDependency()
+                .tableFullName(td.tableFullName()))
+          case fd: org.apache.spark.sql.connector.catalog.FunctionDependency =>
+            ucDep.setFunction(
+              new io.unitycatalog.client.model.FunctionDependency()
+                .functionFullName(fd.functionFullName()))
+          case _ =>
+        }
+        ucDep
+      }
+      ucDepList.setDependencies(java.util.Arrays.asList(ucDeps: _*))
+      ct.setViewDependencies(ucDepList)
     }
 
-    val serverProps = properties.asScala
-      .filterKeys(!Set("table_type", "view_definition", "comment", "view.dependency",
-        "provider").contains(_))
+    val reservedKeys = Set("comment", "provider")
+    val serverProps = tableInfo.properties().asScala
+      .filterKeys(!reservedKeys.contains(_))
       .toMap.asJava
     ct.setProperties(serverProps)
 
@@ -752,10 +769,6 @@ private class UCProxy(
 
   override def createTable(ident: Identifier, schema: StructType, partitions: Array[Transform], properties: util.Map[String, String]): Table = {
     UCSingleCatalog.checkUnsupportedNestedNamespace(ident.namespace())
-
-    if ("METRIC_VIEW".equals(properties.get("table_type"))) {
-      return createMetricView(ident, schema, properties)
-    }
 
     UCSingleCatalog.requireProviderSpecified("CREATE TABLE", properties)
 

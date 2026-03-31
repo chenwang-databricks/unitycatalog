@@ -102,7 +102,7 @@ public class TemporaryTableCredentialsService {
    * 2. The requested table_id is in the dependent's dependency list
    * 3. The dependent's owner has SELECT on the source table
    */
-  private HttpResponse handleDependentCredentialRequest(
+  private HttpResponse `handleDependentCredentialRequest(
       String sourceTableId, String dependentId, TableOperation operation) {
     return TransactionManager.executeWithTransaction(
         sessionFactory,

@@ -384,6 +384,16 @@ public class TableRepository {
         RepositoryUtils.attachProperties(
             tableInfo, tableInfo.getTableId(), Constants.TABLE, session);
       }
+      if ("METRIC_VIEW".equals(tableInfoDAO.getType())) {
+        List<DependencyDAO> deps =
+            repositories
+                .getDependencyRepository()
+                .getDependencies(session, tableInfoDAO.getId(), "TABLE");
+        if (!deps.isEmpty()) {
+          tableInfo.setViewDependencies(
+              new DependencyList().dependencies(DependencyDAO.toDependencyList(deps)));
+        }
+      }
       result.add(tableInfo);
     }
     return new ListTablesResponse().tables(result).nextPageToken(nextPageToken);
