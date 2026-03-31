@@ -449,6 +449,9 @@ object UCSingleCatalog {
   val LOAD_DELTA_CATALOG = ThreadLocal.withInitial[Boolean](() => true)
   val DELTA_CATALOG_LOADED = ThreadLocal.withInitial[Boolean](() => false)
 
+  private[spark] val metadataSnapshotCache =
+    new java.util.concurrent.ConcurrentHashMap[String, TableInfo]()
+
   /**
    * Returns any user-configured {@code fs.<scheme>.impl} values from the current Spark session.
    *
@@ -584,14 +587,17 @@ private class UCProxy(
   }
 
   override def loadTable(ident: Identifier): Table = {
-    val t = try {
-      tablesApi.getTable(
-        UCSingleCatalog.fullTableNameForApi(this.name, ident),
-        /* readStreamingTableAsManaged = */ true,
-        /* readMaterializedViewAsManaged = */ true)
-    } catch {
-      case e: ApiException if e.getCode == 404 =>
-        throw new NoSuchTableException(ident)
+    val fullName = UCSingleCatalog.fullTableNameForApi(this.name, ident)
+    val t = Option(UCSingleCatalog.metadataSnapshotCache.remove(fullName)).getOrElse {
+      try {
+        tablesApi.getTable(
+          fullName,
+          /* readStreamingTableAsManaged = */ true,
+          /* readMaterializedViewAsManaged = */ true)
+      } catch {
+        case e: ApiException if e.getCode == 404 =>
+          throw new NoSuchTableException(ident)
+      }
     }
 
     if (t.getTableType == TableType.METRIC_VIEW) {
@@ -625,6 +631,9 @@ private class UCProxy(
             tableOp = TableOperation.READ
             val readCredRequest = new GenerateTemporaryTableCredential()
               .tableId(tableId).operation(tableOp)
+            org.apache.spark.sql.catalyst.analysis.AnalysisContext.get.metricViewId.foreach { viewId =>
+              readCredRequest.setDependent(viewId)
+            }
             temporaryCredentialsApi.generateTemporaryTableCredentials(readCredRequest)
           } catch {
             case e: ApiException =>
@@ -686,6 +695,22 @@ private class UCProxy(
       }.toArray
     } else {
       Array.empty[StructField]
+    }
+
+    try {
+      val fullName = UCSingleCatalog.fullTableNameForApi(this.name, ident)
+      val snapshot = tablesApi.getMetadataSnapshot(fullName)
+      if (snapshot.getDependencyTableInfos != null) {
+        snapshot.getDependencyTableInfos.asScala.foreach { depTable =>
+          val depFullName =
+            s"${depTable.getCatalogName}.${depTable.getSchemaName}.${depTable.getName}"
+          UCSingleCatalog.metadataSnapshotCache.put(depFullName, depTable)
+        }
+      }
+    } catch {
+      case e: Exception =>
+        logWarning(s"Failed to get metadata snapshot for ${t.getName}, " +
+          s"source table resolution will fall back to direct getTable calls", e)
     }
 
     org.apache.spark.sql.catalyst.analysis.AnalysisContext.setMetricViewId(t.getTableId)

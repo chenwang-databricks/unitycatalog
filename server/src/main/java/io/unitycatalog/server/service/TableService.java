@@ -15,6 +15,7 @@ import io.unitycatalog.server.exception.GlobalExceptionHandler;
 import io.unitycatalog.server.model.CatalogInfo;
 import io.unitycatalog.server.model.CreateTable;
 import io.unitycatalog.server.model.ListTablesResponse;
+import io.unitycatalog.server.model.MetadataSnapshot;
 import io.unitycatalog.server.model.SchemaInfo;
 import io.unitycatalog.server.model.TableInfo;
 import io.unitycatalog.server.persist.CatalogRepository;
@@ -121,6 +122,23 @@ public class TableService extends AuthorizedService {
     assert fullName != null;
     TableInfo tableInfo = tableRepository.getTable(fullName);
     return HttpResponse.ofJson(tableInfo);
+  }
+
+  @Get("/{full_name}/metadata-snapshot")
+  @AuthorizeExpression("""
+      #authorize(#principal, #metastore, OWNER) ||
+      #authorize(#principal, #catalog, OWNER) ||
+      (#authorize(#principal, #schema, OWNER) && #authorize(#principal, #catalog, USE_CATALOG)) ||
+      (#authorize(#principal, #schema, USE_SCHEMA) &&
+          #authorize(#principal, #catalog, USE_CATALOG) &&
+          #authorizeAny(#principal, #table, OWNER, SELECT))
+      """)
+  @AuthorizeResourceKey(METASTORE)
+  public HttpResponse getMetadataSnapshot(
+      @Param("full_name") @AuthorizeResourceKey(TABLE) String fullName) {
+    assert fullName != null;
+    MetadataSnapshot snapshot = tableRepository.getMetadataSnapshot(fullName);
+    return HttpResponse.ofJson(snapshot);
   }
 
   @Get("")

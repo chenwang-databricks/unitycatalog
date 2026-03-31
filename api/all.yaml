@@ -433,6 +433,37 @@ paths:
           content:
             application/json:
               schema: {}
+  /tables/{full_name}/metadata-snapshot:
+    parameters:
+      - name: full_name
+        in: path
+        description: Full name of the metric view (catalog.schema.view_name).
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - Tables
+      operationId: getMetadataSnapshot
+      summary: Get metadata snapshot for a metric view
+      description: |
+        Returns the metric view's metadata along with resolved metadata for all
+        dependency tables. This implements definer's rights for metadata access --
+        the caller only needs SELECT on the metric view, not on the source tables.
+        The server resolves source table metadata server-side.
+      responses:
+        '200':
+          description: Metadata snapshot successfully retrieved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetadataSnapshot'
+        '400':
+          description: Request is invalid (e.g., table is not a METRIC_VIEW).
+        '403':
+          description: Caller does not have SELECT on the metric view.
+        '404':
+          description: Metric view not found.
   /volumes:
     post:
       tags:
@@ -3174,6 +3205,20 @@ components:
       required:
         - commits
         - latest_table_version
+    MetadataSnapshot:
+      type: object
+      description: |
+        A snapshot of metadata for a metric view and its dependency tables.
+        Used for definer's rights resolution -- the server resolves source
+        table metadata so the client does not need direct access to sources.
+      properties:
+        table_info:
+          $ref: '#/components/schemas/TableInfo'
+        dependency_table_infos:
+          description: Resolved metadata for each dependency table.
+          type: array
+          items:
+            $ref: '#/components/schemas/TableInfo'
 info:
   title: Unity Catalog API
   version: '0.1'
