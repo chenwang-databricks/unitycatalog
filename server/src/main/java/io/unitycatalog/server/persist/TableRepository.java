@@ -7,8 +7,10 @@ import io.unitycatalog.server.model.CreateTable;
 import io.unitycatalog.server.model.DataSourceFormat;
 import io.unitycatalog.server.model.DependencyList;
 import io.unitycatalog.server.model.ListTablesResponse;
-import io.unitycatalog.server.model.MetadataSnapshot;
+import io.unitycatalog.server.model.MetadataSnapshotResponse;
+import io.unitycatalog.server.model.MissingReason;
 import io.unitycatalog.server.model.TableInfo;
+import io.unitycatalog.server.model.TableResult;
 import io.unitycatalog.server.model.TableType;
 import io.unitycatalog.server.persist.dao.DependencyDAO;
 import io.unitycatalog.server.persist.dao.PropertyDAO;
@@ -170,7 +172,8 @@ public class TableRepository {
         /* readOnly = */ true);
   }
 
-  public MetadataSnapshot getMetadataSnapshot(String fullName) {
+  public MetadataSnapshotResponse getMetadataSnapshot(
+      String fullName, boolean includeViewDependencyExpansion) {
     LOGGER.debug("Getting metadata snapshot: {}", fullName);
     return TransactionManager.executeWithTransaction(
         sessionFactory,
@@ -182,46 +185,67 @@ public class TableRepository {
           String catalogName = parts[0];
           String schemaName = parts[1];
           String tableName = parts[2];
-          TableInfoDAO viewDAO = findTable(session, catalogName, schemaName, tableName);
-          if (viewDAO == null) {
-            throw new BaseException(ErrorCode.NOT_FOUND, "Table not found: " + fullName);
+          TableInfoDAO tableDAO = findTable(session, catalogName, schemaName, tableName);
+
+          MetadataSnapshotResponse response = new MetadataSnapshotResponse();
+          List<TableResult> tableResults = new ArrayList<>();
+
+          if (tableDAO == null) {
+            tableResults.add(
+                new TableResult()
+                    .reason(
+                        new MissingReason().name(fullName).reason("Table not found: " + fullName)));
+            return response.tables(tableResults);
           }
-          if (!"METRIC_VIEW".equals(viewDAO.getType())) {
-            throw new BaseException(
-                ErrorCode.INVALID_ARGUMENT,
-                "metadata-snapshot is only supported for METRIC_VIEW tables");
-          }
-          TableInfo viewInfo = viewDAO.toTableInfo(true, catalogName, schemaName);
+
+          TableInfo tableInfo = tableDAO.toTableInfo(true, catalogName, schemaName);
           RepositoryUtils.attachProperties(
-              viewInfo, viewInfo.getTableId(), Constants.TABLE, session);
+              tableInfo, tableInfo.getTableId(), Constants.TABLE, session);
 
           List<DependencyDAO> deps =
               repositories
                   .getDependencyRepository()
-                  .getDependencies(session, viewDAO.getId(), "TABLE");
+                  .getDependencies(session, tableDAO.getId(), "TABLE");
           if (!deps.isEmpty()) {
-            viewInfo.setViewDependencies(
+            tableInfo.setViewDependencies(
                 new DependencyList().dependencies(DependencyDAO.toDependencyList(deps)));
           }
+          tableResults.add(new TableResult().table(tableInfo));
 
-          List<TableInfo> depTableInfos = new ArrayList<>();
-          for (DependencyDAO dep : deps) {
-            TableInfoDAO depDAO =
-                findTable(
-                    session,
-                    dep.getDependencyCatalog(),
-                    dep.getDependencySchema(),
-                    dep.getDependencyName());
-            if (depDAO != null) {
-              TableInfo depInfo =
-                  depDAO.toTableInfo(true, dep.getDependencyCatalog(), dep.getDependencySchema());
-              RepositoryUtils.attachProperties(
-                  depInfo, depInfo.getTableId(), Constants.TABLE, session);
-              depTableInfos.add(depInfo);
+          if (includeViewDependencyExpansion
+              && "METRIC_VIEW".equals(tableDAO.getType())
+              && !deps.isEmpty()) {
+            for (DependencyDAO dep : deps) {
+              TableInfoDAO depDAO =
+                  findTable(
+                      session,
+                      dep.getDependencyCatalog(),
+                      dep.getDependencySchema(),
+                      dep.getDependencyName());
+              if (depDAO != null) {
+                TableInfo depInfo =
+                    depDAO.toTableInfo(true, dep.getDependencyCatalog(), dep.getDependencySchema());
+                RepositoryUtils.attachProperties(
+                    depInfo, depInfo.getTableId(), Constants.TABLE, session);
+                tableResults.add(new TableResult().table(depInfo));
+              } else {
+                String depFullName =
+                    dep.getDependencyCatalog()
+                        + "."
+                        + dep.getDependencySchema()
+                        + "."
+                        + dep.getDependencyName();
+                tableResults.add(
+                    new TableResult()
+                        .reason(
+                            new MissingReason()
+                                .name(depFullName)
+                                .reason("Dependency table not found")));
+              }
             }
           }
 
-          return new MetadataSnapshot().tableInfo(viewInfo).dependencyTableInfos(depTableInfos);
+          return response.tables(tableResults);
         },
         "Failed to get metadata snapshot",
         /* readOnly = */ true);

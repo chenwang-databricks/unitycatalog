@@ -10,6 +10,7 @@ import io.unitycatalog.server.auth.annotation.AuthorizeKey;
 import io.unitycatalog.server.exception.BaseException;
 import io.unitycatalog.server.exception.ErrorCode;
 import io.unitycatalog.server.exception.GlobalExceptionHandler;
+import io.unitycatalog.server.model.Dependent;
 import io.unitycatalog.server.model.GenerateTemporaryTableCredential;
 import io.unitycatalog.server.model.TableOperation;
 import io.unitycatalog.server.persist.DependencyRepository;
@@ -81,11 +82,14 @@ public class TemporaryTableCredentialsService {
       @AuthorizeKey(key = "dependent")
       GenerateTemporaryTableCredential generateTemporaryTableCredential) {
     String tableId = generateTemporaryTableCredential.getTableId();
-    String dependentId = generateTemporaryTableCredential.getDependent();
+    Dependent dependent = generateTemporaryTableCredential.getDependent();
 
-    if (dependentId != null) {
+    if (dependent != null && dependent.getTable() != null
+        && dependent.getTable().getTableId() != null) {
       return handleDependentCredentialRequest(
-          tableId, dependentId, generateTemporaryTableCredential.getOperation());
+          tableId,
+          dependent.getTable().getTableId(),
+          generateTemporaryTableCredential.getOperation());
     }
 
     NormalizedURL storageLocation = tableRepository.getStorageLocationForTableOrStagingTable(

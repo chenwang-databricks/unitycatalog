@@ -433,37 +433,36 @@ paths:
           content:
             application/json:
               schema: {}
-  /tables/{full_name}/metadata-snapshot:
-    parameters:
-      - name: full_name
-        in: path
-        description: Full name of the metric view (catalog.schema.view_name).
-        required: true
-        schema:
-          type: string
-    get:
+  /metadata-and-permissions-snapshot:
+    post:
       tags:
         - Tables
-      operationId: getMetadataSnapshot
-      summary: Get metadata snapshot for a metric view
+      operationId: getMetadataAndPermissionsSnapshot
+      summary: Get metadata and permissions snapshot for securables
       description: |
-        Returns the metric view's metadata along with resolved metadata for all
-        dependency tables. This implements definer's rights for metadata access --
-        the caller only needs SELECT on the metric view, not on the source tables.
-        The server resolves source table metadata server-side.
+        Returns a batch metadata snapshot for the requested securables, with optional
+        view dependency expansion. When a securable is a view or metric view and
+        include_view_dependency_expansion is true, the server resolves all transitive
+        dependency tables and includes their metadata in the response. This implements
+        definer's rights for metadata access -- the caller only needs SELECT on the
+        view, not on the source tables. Compatible with Databricks UC MAPS endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MetadataAndPermissionsSnapshotRequest'
       responses:
         '200':
-          description: Metadata snapshot successfully retrieved.
+          description: Metadata and permissions snapshot successfully retrieved.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/MetadataSnapshot'
+                $ref: '#/components/schemas/MetadataAndPermissionsSnapshotResponse'
         '400':
-          description: Request is invalid (e.g., table is not a METRIC_VIEW).
+          description: Request is invalid (e.g., missing securables).
         '403':
-          description: Caller does not have SELECT on the metric view.
-        '404':
-          description: Metric view not found.
+          description: Caller does not have required permissions.
   /volumes:
     post:
       tags:
@@ -2400,10 +2399,12 @@ components:
           $ref: '#/components/schemas/TableOperation'
         dependent:
           description: |
-            Optional. Table ID of the view or metric view through which
-            this table is being accessed. When provided, the server performs
-            view-mediated authorization instead of direct authorization.
-          type: string
+            Optional. The entity that depends on the table, such as a view
+            or metric view through which this table is being accessed.
+            When provided, the server performs view-mediated authorization
+            instead of direct authorization. Compatible with Databricks UC
+            Dependent proto wire format.
+          $ref: '#/components/schemas/Dependent'
       type: object
       required:
         - table_id
@@ -3205,20 +3206,117 @@ components:
       required:
         - commits
         - latest_table_version
-    MetadataSnapshot:
+    Securable:
+      type: object
+      description: A reference to a securable object for batch metadata requests.
+      properties:
+        type:
+          $ref: '#/components/schemas/SecurableType'
+        full_name:
+          description: Full name of the securable (e.g. catalog.schema.table).
+          type: string
+      required:
+        - type
+        - full_name
+    MissingReason:
+      type: object
+      description: Reason why a requested securable could not be resolved.
+      properties:
+        name:
+          description: Full name of the missing object.
+          type: string
+        reason:
+          description: Error message explaining why the object is missing.
+          type: string
+    TableResult:
+      type: object
+      description: Result wrapper for a table in a metadata snapshot response.
+      properties:
+        table:
+          $ref: '#/components/schemas/TableInfo'
+        reason:
+          $ref: '#/components/schemas/MissingReason'
+    SchemaResult:
+      type: object
+      description: Result wrapper for a schema in a metadata snapshot response.
+      properties:
+        schema:
+          $ref: '#/components/schemas/SchemaInfo'
+        reason:
+          $ref: '#/components/schemas/MissingReason'
+    CatalogResult:
+      type: object
+      description: Result wrapper for a catalog in a metadata snapshot response.
+      properties:
+        catalog:
+          $ref: '#/components/schemas/CatalogInfo'
+        reason:
+          $ref: '#/components/schemas/MissingReason'
+    MetadataAndPermissionsSnapshotRequest:
       type: object
       description: |
-        A snapshot of metadata for a metric view and its dependency tables.
-        Used for definer's rights resolution -- the server resolves source
-        table metadata so the client does not need direct access to sources.
+        Request for a batch metadata and permissions snapshot. Compatible with the
+        Databricks UC MetadataAndPermissionsSnapshot RPC.
       properties:
-        table_info:
-          $ref: '#/components/schemas/TableInfo'
-        dependency_table_infos:
-          description: Resolved metadata for each dependency table.
+        securables:
+          description: List of securables for which metadata is requested.
           type: array
           items:
-            $ref: '#/components/schemas/TableInfo'
+            $ref: '#/components/schemas/Securable'
+        include_view_dependency_expansion:
+          description: |
+            If true, view and metric view dependencies are resolved server-side
+            and included in the response. The full dependency DAG is traversed
+            and authorized using definer's rights.
+          type: boolean
+          default: false
+      required:
+        - securables
+    MetadataSnapshotResponse:
+      type: object
+      description: |
+        Inner metadata snapshot containing resolved metadata for the requested
+        securables and optionally their transitive dependencies.
+      properties:
+        catalogs:
+          description: Catalog metadata for the requested securables.
+          type: array
+          items:
+            $ref: '#/components/schemas/CatalogResult'
+        schemas:
+          description: Schema metadata for the requested securables.
+          type: array
+          items:
+            $ref: '#/components/schemas/SchemaResult'
+        tables:
+          description: Table metadata for the requested securables and dependencies.
+          type: array
+          items:
+            $ref: '#/components/schemas/TableResult'
+    MetadataAndPermissionsSnapshotResponse:
+      type: object
+      description: |
+        Batch metadata and permissions snapshot response. The metadata field wraps
+        the resolved metadata for the requested securables. Compatible with the
+        Databricks UC MetadataAndPermissionsSnapshot.Response wire format.
+      properties:
+        metadata:
+          $ref: '#/components/schemas/MetadataSnapshotResponse'
+    Dependent:
+      type: object
+      description: |
+        The entity that depends on a table, such as a view or metric view.
+        Compatible with the Databricks UC Dependent proto wire format.
+      properties:
+        table:
+          $ref: '#/components/schemas/TableDependent'
+    TableDependent:
+      type: object
+      description: A table that is the dependent entity (e.g. a view or metric view).
+      properties:
+        table_id:
+          description: The table ID of the dependent entity.
+          type: string
 info:
   title: Unity Catalog API
   version: '0.1'

@@ -12,12 +12,18 @@ import io.unitycatalog.client.model.CreateTable;
 import io.unitycatalog.client.model.DataSourceFormat;
 import io.unitycatalog.client.model.Dependency;
 import io.unitycatalog.client.model.DependencyList;
+import io.unitycatalog.client.model.Dependent;
 import io.unitycatalog.client.model.GenerateTemporaryTableCredential;
-import io.unitycatalog.client.model.MetadataSnapshot;
+import io.unitycatalog.client.model.MetadataAndPermissionsSnapshotRequest;
+import io.unitycatalog.client.model.MetadataAndPermissionsSnapshotResponse;
+import io.unitycatalog.client.model.MetadataSnapshotResponse;
+import io.unitycatalog.client.model.Securable;
 import io.unitycatalog.client.model.SecurableType;
 import io.unitycatalog.client.model.TableDependency;
+import io.unitycatalog.client.model.TableDependent;
 import io.unitycatalog.client.model.TableInfo;
 import io.unitycatalog.client.model.TableOperation;
+import io.unitycatalog.client.model.TableResult;
 import io.unitycatalog.client.model.TableType;
 import io.unitycatalog.server.base.ServerConfig;
 import io.unitycatalog.server.exception.ErrorCode;
@@ -70,6 +76,10 @@ public class SdkMetricViewAccessControlTest extends SdkAccessControlBaseCRUDTest
               .position(0)
               .nullable(true));
 
+  private static Dependent makeDependentFromView(TableInfo metricView) {
+    return new Dependent().table(new TableDependent().tableId(metricView.getTableId()));
+  }
+
   /**
    * Positive test: view-mediated credential vending succeeds when all three checks pass.
    *
@@ -81,11 +91,9 @@ public class SdkMetricViewAccessControlTest extends SdkAccessControlBaseCRUDTest
     createTestUser(VIEW_OWNER_EMAIL, "View Owner");
     createTestUser(READER_EMAIL, "Reader");
 
-    // Create source table as admin first (must exist before granting permissions)
     TablesApi adminTablesApi = new TablesApi(adminApiClient);
     TableInfo sourceTable = createSourceTable(adminTablesApi);
 
-    // Grant view owner: catalog/schema access + CREATE_TABLE + SELECT on source table
     grantViewOwnerBasePermissions();
     grantPermissions(
         VIEW_OWNER_EMAIL,
@@ -95,16 +103,13 @@ public class SdkMetricViewAccessControlTest extends SdkAccessControlBaseCRUDTest
     grantPermissions(
         VIEW_OWNER_EMAIL, SecurableType.TABLE, SOURCE_TABLE_FULL_NAME, Privileges.SELECT);
 
-    // Create metric view as view owner (so owner field is set correctly)
     ServerConfig viewOwnerConfig = createTestUserServerConfig(VIEW_OWNER_EMAIL);
     TablesApi viewOwnerTablesApi = new TablesApi(TestUtils.createApiClient(viewOwnerConfig));
     TableInfo metricView = createMetricView(viewOwnerTablesApi, sourceTable);
 
-    // Grant reader: catalog/schema access + SELECT on metric view
     grantReaderBasePermissions();
     grantPermissions(READER_EMAIL, SecurableType.TABLE, METRIC_VIEW_FULL_NAME, Privileges.SELECT);
 
-    // Reader requests credentials for source table through the metric view
     ServerConfig readerConfig = createTestUserServerConfig(READER_EMAIL);
     TemporaryCredentialsApi readerTempCredsApi =
         new TemporaryCredentialsApi(TestUtils.createApiClient(readerConfig));
@@ -113,9 +118,8 @@ public class SdkMetricViewAccessControlTest extends SdkAccessControlBaseCRUDTest
         new GenerateTemporaryTableCredential()
             .tableId(sourceTable.getTableId())
             .operation(TableOperation.READ)
-            .dependent(metricView.getTableId());
+            .dependent(makeDependentFromView(metricView));
 
-    // Should succeed: all three checks pass
     readerTempCredsApi.generateTemporaryTableCredentials(credRequest);
   }
 
@@ -145,7 +149,6 @@ public class SdkMetricViewAccessControlTest extends SdkAccessControlBaseCRUDTest
     TablesApi viewOwnerTablesApi = new TablesApi(TestUtils.createApiClient(viewOwnerConfig));
     TableInfo metricView = createMetricView(viewOwnerTablesApi, sourceTable);
 
-    // Grant reader catalog/schema access but NOT SELECT on metric view
     grantReaderBasePermissions();
 
     ServerConfig readerConfig = createTestUserServerConfig(READER_EMAIL);
@@ -156,7 +159,7 @@ public class SdkMetricViewAccessControlTest extends SdkAccessControlBaseCRUDTest
         new GenerateTemporaryTableCredential()
             .tableId(sourceTable.getTableId())
             .operation(TableOperation.READ)
-            .dependent(metricView.getTableId());
+            .dependent(makeDependentFromView(metricView));
 
     assertThatExceptionOfType(ApiException.class)
         .isThrownBy(() -> readerTempCredsApi.generateTemporaryTableCredentials(credRequest))
@@ -187,7 +190,6 @@ public class SdkMetricViewAccessControlTest extends SdkAccessControlBaseCRUDTest
     TablesApi adminTablesApi = new TablesApi(adminApiClient);
     TableInfo sourceTable = createSourceTable(adminTablesApi);
 
-    // Create a metric view WITHOUT dependencies
     ServerConfig viewOwnerConfig = createTestUserServerConfig(VIEW_OWNER_EMAIL);
     TablesApi viewOwnerTablesApi = new TablesApi(TestUtils.createApiClient(viewOwnerConfig));
 
@@ -200,7 +202,6 @@ public class SdkMetricViewAccessControlTest extends SdkAccessControlBaseCRUDTest
             .viewDefinition(VIEW_DEFINITION);
     TableInfo metricView = viewOwnerTablesApi.createTable(createMetricView);
 
-    // Grant reader SELECT on metric view
     grantReaderBasePermissions();
     grantPermissions(READER_EMAIL, SecurableType.TABLE, METRIC_VIEW_FULL_NAME, Privileges.SELECT);
 
@@ -212,7 +213,7 @@ public class SdkMetricViewAccessControlTest extends SdkAccessControlBaseCRUDTest
         new GenerateTemporaryTableCredential()
             .tableId(sourceTable.getTableId())
             .operation(TableOperation.READ)
-            .dependent(metricView.getTableId());
+            .dependent(makeDependentFromView(metricView));
 
     assertThatExceptionOfType(ApiException.class)
         .isThrownBy(() -> readerTempCredsApi.generateTemporaryTableCredentials(credRequest))
@@ -233,7 +234,6 @@ public class SdkMetricViewAccessControlTest extends SdkAccessControlBaseCRUDTest
     createTestUser(VIEW_OWNER_EMAIL, "View Owner");
     createTestUser(READER_EMAIL, "Reader");
 
-    // Grant view owner catalog/schema access but NOT SELECT on source table
     grantViewOwnerBasePermissions();
     grantPermissions(
         VIEW_OWNER_EMAIL,
@@ -248,7 +248,6 @@ public class SdkMetricViewAccessControlTest extends SdkAccessControlBaseCRUDTest
     TablesApi viewOwnerTablesApi = new TablesApi(TestUtils.createApiClient(viewOwnerConfig));
     TableInfo metricView = createMetricView(viewOwnerTablesApi, sourceTable);
 
-    // Grant reader SELECT on metric view
     grantReaderBasePermissions();
     grantPermissions(READER_EMAIL, SecurableType.TABLE, METRIC_VIEW_FULL_NAME, Privileges.SELECT);
 
@@ -260,7 +259,7 @@ public class SdkMetricViewAccessControlTest extends SdkAccessControlBaseCRUDTest
         new GenerateTemporaryTableCredential()
             .tableId(sourceTable.getTableId())
             .operation(TableOperation.READ)
-            .dependent(metricView.getTableId());
+            .dependent(makeDependentFromView(metricView));
 
     assertThatExceptionOfType(ApiException.class)
         .isThrownBy(() -> readerTempCredsApi.generateTemporaryTableCredentials(credRequest))
@@ -271,7 +270,7 @@ public class SdkMetricViewAccessControlTest extends SdkAccessControlBaseCRUDTest
   }
 
   /**
-   * Positive test: metadata snapshot succeeds when the reader has SELECT on the metric view. The
+   * Positive test: MAPS snapshot succeeds when the reader has SELECT on the metric view. The
    * response should include the source table's full metadata even though the reader has no direct
    * SELECT on it (definer's rights for metadata access).
    */
@@ -302,23 +301,36 @@ public class SdkMetricViewAccessControlTest extends SdkAccessControlBaseCRUDTest
     ServerConfig readerConfig = createTestUserServerConfig(READER_EMAIL);
     TablesApi readerTablesApi = new TablesApi(TestUtils.createApiClient(readerConfig));
 
-    MetadataSnapshot snapshot = readerTablesApi.getMetadataSnapshot(METRIC_VIEW_FULL_NAME);
+    MetadataAndPermissionsSnapshotRequest request =
+        new MetadataAndPermissionsSnapshotRequest()
+            .securables(
+                List.of(new Securable().type(SecurableType.TABLE).fullName(METRIC_VIEW_FULL_NAME)))
+            .includeViewDependencyExpansion(true);
+    MetadataAndPermissionsSnapshotResponse response =
+        readerTablesApi.getMetadataAndPermissionsSnapshot(request);
 
-    assertThat(snapshot.getTableInfo()).isNotNull();
-    assertThat(snapshot.getTableInfo().getName()).isEqualTo(METRIC_VIEW_NAME);
-    assertThat(snapshot.getTableInfo().getTableType()).isEqualTo(TableType.METRIC_VIEW);
+    MetadataSnapshotResponse metadata = response.getMetadata();
+    assertThat(metadata).isNotNull();
+    assertThat(metadata.getTables()).isNotNull();
+    assertThat(metadata.getTables()).hasSizeGreaterThanOrEqualTo(2);
 
-    assertThat(snapshot.getDependencyTableInfos()).isNotNull();
-    assertThat(snapshot.getDependencyTableInfos()).hasSize(1);
+    TableResult viewResult = metadata.getTables().get(0);
+    assertThat(viewResult.getTable()).isNotNull();
+    assertThat(viewResult.getTable().getName()).isEqualTo(METRIC_VIEW_NAME);
+    assertThat(viewResult.getTable().getTableType()).isEqualTo(TableType.METRIC_VIEW);
 
-    TableInfo resolvedSource = snapshot.getDependencyTableInfos().get(0);
-    assertThat(resolvedSource.getName()).isEqualTo(SOURCE_TABLE_NAME);
-    assertThat(resolvedSource.getStorageLocation()).isNotNull();
-    assertThat(resolvedSource.getColumns()).isNotNull();
-    assertThat(resolvedSource.getColumns()).hasSizeGreaterThan(0);
+    TableResult sourceResult = metadata.getTables().get(1);
+    assertThat(sourceResult.getTable()).isNotNull();
+    assertThat(sourceResult.getTable().getName()).isEqualTo(SOURCE_TABLE_NAME);
+    assertThat(sourceResult.getTable().getStorageLocation()).isNotNull();
+    assertThat(sourceResult.getTable().getColumns()).isNotNull();
+    assertThat(sourceResult.getTable().getColumns()).hasSizeGreaterThan(0);
   }
 
-  /** Negative test: metadata snapshot fails when the reader lacks SELECT on the metric view. */
+  /**
+   * Negative test: MAPS snapshot filters out results when the reader lacks SELECT on the metric
+   * view. The batch endpoint returns an empty tables list rather than a 403.
+   */
   @Test
   public void testMetadataSnapshotDeniedNoSelectOnView() throws Exception {
     createTestUser(VIEW_OWNER_EMAIL, "View Owner");
@@ -340,34 +352,49 @@ public class SdkMetricViewAccessControlTest extends SdkAccessControlBaseCRUDTest
     TablesApi viewOwnerTablesApi = new TablesApi(TestUtils.createApiClient(viewOwnerConfig));
     createMetricView(viewOwnerTablesApi, sourceTable);
 
-    // Grant reader catalog/schema access but NOT SELECT on metric view
     grantReaderBasePermissions();
 
     ServerConfig readerConfig = createTestUserServerConfig(READER_EMAIL);
     TablesApi readerTablesApi = new TablesApi(TestUtils.createApiClient(readerConfig));
 
-    assertThatExceptionOfType(ApiException.class)
-        .isThrownBy(() -> readerTablesApi.getMetadataSnapshot(METRIC_VIEW_FULL_NAME))
-        .satisfies(
-            ex ->
-                assertThat(ex.getCode())
-                    .isEqualTo(ErrorCode.PERMISSION_DENIED.getHttpStatus().code()));
+    MetadataAndPermissionsSnapshotRequest request =
+        new MetadataAndPermissionsSnapshotRequest()
+            .securables(
+                List.of(new Securable().type(SecurableType.TABLE).fullName(METRIC_VIEW_FULL_NAME)))
+            .includeViewDependencyExpansion(true);
+    MetadataAndPermissionsSnapshotResponse response =
+        readerTablesApi.getMetadataAndPermissionsSnapshot(request);
+
+    assertThat(response.getMetadata()).isNotNull();
+    assertThat(response.getMetadata().getTables()).isEmpty();
   }
 
-  /** Negative test: metadata snapshot fails when called on a non-METRIC_VIEW table. */
+  /** Test: MAPS snapshot on a non-METRIC_VIEW returns the table without dependency expansion. */
   @Test
-  public void testMetadataSnapshotNonMetricViewFails() throws Exception {
+  public void testMetadataSnapshotNonMetricViewReturnsSingleTable() throws Exception {
     TablesApi adminTablesApi = new TablesApi(adminApiClient);
     createSourceTable(adminTablesApi);
 
-    assertThatExceptionOfType(ApiException.class)
-        .isThrownBy(() -> adminTablesApi.getMetadataSnapshot(SOURCE_TABLE_FULL_NAME))
-        .satisfies(ex -> assertThat(ex.getCode()).isEqualTo(400));
+    MetadataAndPermissionsSnapshotRequest request =
+        new MetadataAndPermissionsSnapshotRequest()
+            .securables(
+                List.of(new Securable().type(SecurableType.TABLE).fullName(SOURCE_TABLE_FULL_NAME)))
+            .includeViewDependencyExpansion(true);
+    MetadataAndPermissionsSnapshotResponse response =
+        adminTablesApi.getMetadataAndPermissionsSnapshot(request);
+
+    assertThat(response.getMetadata()).isNotNull();
+    assertThat(response.getMetadata().getTables()).hasSize(1);
+    assertThat(response.getMetadata().getTables().get(0).getTable()).isNotNull();
+    assertThat(response.getMetadata().getTables().get(0).getTable().getName())
+        .isEqualTo(SOURCE_TABLE_NAME);
+    assertThat(response.getMetadata().getTables().get(0).getTable().getTableType())
+        .isEqualTo(TableType.EXTERNAL);
   }
 
   /**
-   * Positive test: metadata snapshot resolves full source table metadata including columns and
-   * storage location, verifying the server-side resolution is complete.
+   * Positive test: MAPS snapshot resolves full source table metadata including columns and storage
+   * location, verifying the server-side resolution is complete.
    */
   @Test
   public void testMetadataSnapshotResolvesSourceMetadata() throws Exception {
@@ -375,22 +402,73 @@ public class SdkMetricViewAccessControlTest extends SdkAccessControlBaseCRUDTest
     TableInfo sourceTable = createSourceTable(adminTablesApi);
     TableInfo metricView = createMetricView(adminTablesApi, sourceTable);
 
-    MetadataSnapshot snapshot = adminTablesApi.getMetadataSnapshot(METRIC_VIEW_FULL_NAME);
+    MetadataAndPermissionsSnapshotRequest request =
+        new MetadataAndPermissionsSnapshotRequest()
+            .securables(
+                List.of(new Securable().type(SecurableType.TABLE).fullName(METRIC_VIEW_FULL_NAME)))
+            .includeViewDependencyExpansion(true);
+    MetadataAndPermissionsSnapshotResponse response =
+        adminTablesApi.getMetadataAndPermissionsSnapshot(request);
 
-    assertThat(snapshot.getTableInfo().getTableId()).isEqualTo(metricView.getTableId());
-    assertThat(snapshot.getTableInfo().getViewDefinition()).isEqualTo(VIEW_DEFINITION);
-    assertThat(snapshot.getTableInfo().getViewDependencies()).isNotNull();
+    MetadataSnapshotResponse metadata = response.getMetadata();
+    assertThat(metadata).isNotNull();
+    assertThat(metadata.getTables()).hasSizeGreaterThanOrEqualTo(2);
 
-    assertThat(snapshot.getDependencyTableInfos()).hasSize(1);
-    TableInfo resolvedSource = snapshot.getDependencyTableInfos().get(0);
-    assertThat(resolvedSource.getTableId()).isEqualTo(sourceTable.getTableId());
-    assertThat(resolvedSource.getCatalogName()).isEqualTo(TestUtils.CATALOG_NAME);
-    assertThat(resolvedSource.getSchemaName()).isEqualTo(TestUtils.SCHEMA_NAME);
-    assertThat(resolvedSource.getStorageLocation())
+    TableResult viewResult = metadata.getTables().get(0);
+    assertThat(viewResult.getTable().getTableId()).isEqualTo(metricView.getTableId());
+    assertThat(viewResult.getTable().getViewDefinition()).isEqualTo(VIEW_DEFINITION);
+    assertThat(viewResult.getTable().getViewDependencies()).isNotNull();
+
+    TableResult sourceResult = metadata.getTables().get(1);
+    assertThat(sourceResult.getTable().getTableId()).isEqualTo(sourceTable.getTableId());
+    assertThat(sourceResult.getTable().getCatalogName()).isEqualTo(TestUtils.CATALOG_NAME);
+    assertThat(sourceResult.getTable().getSchemaName()).isEqualTo(TestUtils.SCHEMA_NAME);
+    assertThat(sourceResult.getTable().getStorageLocation())
         .contains("uc-test-metric-view/" + SOURCE_TABLE_NAME);
-    assertThat(resolvedSource.getDataSourceFormat()).isEqualTo(DataSourceFormat.PARQUET);
-    assertThat(resolvedSource.getColumns()).hasSize(1);
-    assertThat(resolvedSource.getColumns().get(0).getName()).isEqualTo("amount");
+    assertThat(sourceResult.getTable().getDataSourceFormat()).isEqualTo(DataSourceFormat.PARQUET);
+    assertThat(sourceResult.getTable().getColumns()).hasSize(1);
+    assertThat(sourceResult.getTable().getColumns().get(0).getName()).isEqualTo("amount");
+  }
+
+  /**
+   * Positive test: batch request with multiple securables (metric view + regular table) returns
+   * correct results for each.
+   */
+  @Test
+  public void testMetadataSnapshotBatchMultipleSecurables() throws Exception {
+    TablesApi adminTablesApi = new TablesApi(adminApiClient);
+    TableInfo sourceTable = createSourceTable(adminTablesApi);
+    TableInfo metricView = createMetricView(adminTablesApi, sourceTable);
+
+    MetadataAndPermissionsSnapshotRequest request =
+        new MetadataAndPermissionsSnapshotRequest()
+            .securables(
+                List.of(
+                    new Securable().type(SecurableType.TABLE).fullName(METRIC_VIEW_FULL_NAME),
+                    new Securable().type(SecurableType.TABLE).fullName(SOURCE_TABLE_FULL_NAME)))
+            .includeViewDependencyExpansion(true);
+    MetadataAndPermissionsSnapshotResponse response =
+        adminTablesApi.getMetadataAndPermissionsSnapshot(request);
+
+    MetadataSnapshotResponse metadata = response.getMetadata();
+    assertThat(metadata).isNotNull();
+    assertThat(metadata.getTables()).hasSizeGreaterThanOrEqualTo(3);
+
+    assertThat(metadata.getTables().get(0).getTable().getName()).isEqualTo(METRIC_VIEW_NAME);
+    assertThat(metadata.getTables().get(0).getTable().getTableType())
+        .isEqualTo(TableType.METRIC_VIEW);
+
+    boolean foundStandaloneSource = false;
+    for (TableResult tr : metadata.getTables()) {
+      if (tr.getTable() != null
+          && SOURCE_TABLE_NAME.equals(tr.getTable().getName())
+          && tr.getTable().getTableType() == TableType.EXTERNAL) {
+        foundStandaloneSource = true;
+      }
+    }
+    assertThat(foundStandaloneSource)
+        .as("Response should include the standalone source table from the second securable")
+        .isTrue();
   }
 
   private TableInfo createSourceTable(TablesApi tablesApi) throws ApiException {
