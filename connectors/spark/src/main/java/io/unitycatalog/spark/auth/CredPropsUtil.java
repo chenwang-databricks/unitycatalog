@@ -4,8 +4,6 @@ import static io.unitycatalog.spark.UCHadoopConf.FS_AZURE_ACCOUNT_AUTH_TYPE_PROP
 import static io.unitycatalog.spark.UCHadoopConf.FS_AZURE_ACCOUNT_IS_HNS_ENABLED;
 import static io.unitycatalog.spark.UCHadoopConf.FS_AZURE_SAS_TOKEN_PROVIDER_TYPE;
 
-import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableMap;
 import io.unitycatalog.client.auth.TokenProvider;
 import io.unitycatalog.client.model.AwsCredentials;
 import io.unitycatalog.client.model.AzureUserDelegationSAS;
@@ -21,6 +19,8 @@ import io.unitycatalog.spark.fs.CredScopedFileSystem;
 import io.unitycatalog.spark.fs.CredScopedFs;
 import java.util.Map;
 import java.util.UUID;
+import org.sparkproject.guava.base.Preconditions;
+import org.sparkproject.guava.collect.ImmutableMap;
 
 public class CredPropsUtil {
   private CredPropsUtil() {}

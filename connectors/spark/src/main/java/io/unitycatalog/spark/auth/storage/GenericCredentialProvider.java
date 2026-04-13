@@ -1,8 +1,5 @@
 package io.unitycatalog.spark.auth.storage;
 
-import com.google.common.base.Preconditions;
-import com.google.common.cache.Cache;
-import com.google.common.cache.CacheBuilder;
 import io.unitycatalog.client.ApiException;
 import io.unitycatalog.client.api.TemporaryCredentialsApi;
 import io.unitycatalog.client.auth.TokenProvider;
@@ -17,6 +14,9 @@ import io.unitycatalog.spark.ApiClientFactory;
 import io.unitycatalog.spark.UCHadoopConf;
 import java.net.URI;
 import org.apache.hadoop.conf.Configuration;
+import org.sparkproject.guava.base.Preconditions;
+import org.sparkproject.guava.cache.Cache;
+import org.sparkproject.guava.cache.CacheBuilder;
 
 public abstract class GenericCredentialProvider {
   // The credential cache, for saving QPS to unity catalog server.

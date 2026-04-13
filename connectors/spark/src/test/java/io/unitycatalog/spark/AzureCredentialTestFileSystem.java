@@ -3,10 +3,10 @@ package io.unitycatalog.spark;
 import static io.unitycatalog.spark.UCHadoopConf.FS_AZURE_SAS_TOKEN_PROVIDER_TYPE;
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.google.common.base.Objects;
 import io.unitycatalog.spark.auth.storage.AbfsVendedTokenProvider;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
+import org.sparkproject.guava.base.Objects;
 
 public class AzureCredentialTestFileSystem extends CredentialTestFileSystem {
   private volatile AbfsVendedTokenProvider provider;

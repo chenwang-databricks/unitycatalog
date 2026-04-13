@@ -18,7 +18,7 @@ import org.apache.spark.sql.connector.catalog._
 import org.apache.spark.sql.connector.expressions.Transform
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
-import com.google.common.base.Preconditions
+import org.sparkproject.guava.base.Preconditions
 
 import java.net.URI
 import java.util
@@ -132,6 +132,8 @@ class UCSingleCatalog
       val newProps = prepareExternalTableProperties(properties)
       delegate.createTable(ident, columns, partitions, newProps)
     } else {
+      // TODO: for path-based tables, Spark should generate a location property using the qualified
+      //       path string.
       delegate.createTable(ident, columns, partitions, properties)
     }
   }
@@ -584,10 +586,9 @@ private class UCProxy(
   }
 
   override def loadTable(ident: Identifier): Table = {
-    val fullName = UCSingleCatalog.fullTableNameForApi(this.name, ident)
     val t = try {
       tablesApi.getTable(
-        fullName,
+        UCSingleCatalog.fullTableNameForApi(this.name, ident),
         /* readStreamingTableAsManaged = */ true,
         /* readMaterializedViewAsManaged = */ true)
     } catch {
@@ -611,18 +612,25 @@ private class UCProxy(
     val locationUri = CatalogUtils.stringToURI(t.getStorageLocation)
     val tableId = t.getTableId
     var tableOp = TableOperation.READ_WRITE
-    val credRequest = new GenerateTemporaryTableCredential().tableId(tableId).operation(tableOp)
     val temporaryCredentials = {
       try {
-        temporaryCredentialsApi.generateTemporaryTableCredentials(credRequest)
-      } catch {
+        temporaryCredentialsApi
+          .generateTemporaryTableCredentials(
+            // TODO: at this time, we don't know if the table will be read or written. For now we always
+            //       request READ_WRITE credentials as the server doesn't distinguish between READ and
+            //       READ_WRITE credentials as of today. When loading a table, Spark should tell if it's
+            //       for read or write, we can request the proper credential after fixing Spark.
+            new GenerateTemporaryTableCredential().tableId(tableId).operation(tableOp)
+          )
+      }       catch {
         case e: ApiException =>
           logWarning(s"READ_WRITE credential generation failed for table $identifier: ${e.getMessage}")
           try {
             tableOp = TableOperation.READ
-            val readCredRequest = new GenerateTemporaryTableCredential()
-              .tableId(tableId).operation(tableOp)
-            temporaryCredentialsApi.generateTemporaryTableCredentials(readCredRequest)
+            temporaryCredentialsApi
+              .generateTemporaryTableCredentials(
+                new GenerateTemporaryTableCredential().tableId(tableId).operation(tableOp)
+              )
           } catch {
             case e: ApiException =>
               logWarning(s"READ credential generation failed for table $identifier: ${e.getMessage}")
@@ -668,6 +676,9 @@ private class UCProxy(
       tracksPartitionsInCatalog = false,
       partitionColumnNames = partitionCols.sortBy(_._2).map(_._1).toSeq
     )
+    // Spark separates table lookup and data source resolution. To support Spark native data
+    // sources, here we return the `V1Table` which only contains the table metadata. Spark will
+    // resolve the data source and create scan node later.
     Class.forName("org.apache.spark.sql.connector.catalog.V1Table")
       .getDeclaredConstructor(classOf[CatalogTable])
       .newInstance(sparkTable)
