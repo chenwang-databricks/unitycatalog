@@ -34,7 +34,6 @@ import io.unitycatalog.server.service.DeltaCommitsService;
 import io.unitycatalog.server.service.ExternalLocationService;
 import io.unitycatalog.server.service.FunctionService;
 import io.unitycatalog.server.service.IcebergRestCatalogService;
-import io.unitycatalog.server.service.MetadataSnapshotService;
 import io.unitycatalog.server.service.MetastoreService;
 import io.unitycatalog.server.service.ModelService;
 import io.unitycatalog.server.service.PermissionService;
@@ -168,8 +167,6 @@ public class UnityCatalogServer {
     SchemaService schemaService = new SchemaService(authorizer, repositories);
     VolumeService volumeService = new VolumeService(authorizer, repositories);
     TableService tableService = new TableService(authorizer, repositories);
-    MetadataSnapshotService metadataSnapshotService =
-        new MetadataSnapshotService(authorizer, repositories);
     StagingTableService stagingTableService = new StagingTableService(authorizer, repositories);
     FunctionService functionService = new FunctionService(authorizer, repositories);
     ModelService modelService = new ModelService(authorizer, repositories);
@@ -217,10 +214,6 @@ public class UnityCatalogServer {
         .annotatedService(BASE_PATH + "schemas", schemaService, requestConverterFunction)
         .annotatedService(BASE_PATH + "volumes", volumeService, requestConverterFunction)
         .annotatedService(BASE_PATH + "tables", tableService, requestConverterFunction)
-        .annotatedService(
-            BASE_PATH + "metadata-and-permissions-snapshot",
-            metadataSnapshotService,
-            requestConverterFunction)
         .annotatedService(
             BASE_PATH + "staging-tables", stagingTableService, requestConverterFunction)
         .annotatedService(BASE_PATH + "functions", functionService, requestConverterFunction)

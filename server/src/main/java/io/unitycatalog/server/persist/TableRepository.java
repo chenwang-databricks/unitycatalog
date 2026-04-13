@@ -7,10 +7,7 @@ import io.unitycatalog.server.model.CreateTable;
 import io.unitycatalog.server.model.DataSourceFormat;
 import io.unitycatalog.server.model.DependencyList;
 import io.unitycatalog.server.model.ListTablesResponse;
-import io.unitycatalog.server.model.MetadataSnapshotResponse;
-import io.unitycatalog.server.model.MissingReason;
 import io.unitycatalog.server.model.TableInfo;
-import io.unitycatalog.server.model.TableResult;
 import io.unitycatalog.server.model.TableType;
 import io.unitycatalog.server.persist.dao.DependencyDAO;
 import io.unitycatalog.server.persist.dao.PropertyDAO;
@@ -169,85 +166,6 @@ public class TableRepository {
           return tableInfo;
         },
         "Failed to get table",
-        /* readOnly = */ true);
-  }
-
-  public MetadataSnapshotResponse getMetadataSnapshot(
-      String fullName, boolean includeViewDependencyExpansion) {
-    LOGGER.debug("Getting metadata snapshot: {}", fullName);
-    return TransactionManager.executeWithTransaction(
-        sessionFactory,
-        session -> {
-          String[] parts = fullName.split("\\.");
-          if (parts.length != 3) {
-            throw new BaseException(ErrorCode.INVALID_ARGUMENT, "Invalid table name: " + fullName);
-          }
-          String catalogName = parts[0];
-          String schemaName = parts[1];
-          String tableName = parts[2];
-          TableInfoDAO tableDAO = findTable(session, catalogName, schemaName, tableName);
-
-          MetadataSnapshotResponse response = new MetadataSnapshotResponse();
-          List<TableResult> tableResults = new ArrayList<>();
-
-          if (tableDAO == null) {
-            tableResults.add(
-                new TableResult()
-                    .reason(
-                        new MissingReason().name(fullName).reason("Table not found: " + fullName)));
-            return response.tables(tableResults);
-          }
-
-          TableInfo tableInfo = tableDAO.toTableInfo(true, catalogName, schemaName);
-          RepositoryUtils.attachProperties(
-              tableInfo, tableInfo.getTableId(), Constants.TABLE, session);
-
-          List<DependencyDAO> deps =
-              repositories
-                  .getDependencyRepository()
-                  .getDependencies(session, tableDAO.getId(), "TABLE");
-          if (!deps.isEmpty()) {
-            tableInfo.setViewDependencies(
-                new DependencyList().dependencies(DependencyDAO.toDependencyList(deps)));
-          }
-          tableResults.add(new TableResult().table(tableInfo));
-
-          if (includeViewDependencyExpansion
-              && "METRIC_VIEW".equals(tableDAO.getType())
-              && !deps.isEmpty()) {
-            for (DependencyDAO dep : deps) {
-              TableInfoDAO depDAO =
-                  findTable(
-                      session,
-                      dep.getDependencyCatalog(),
-                      dep.getDependencySchema(),
-                      dep.getDependencyName());
-              if (depDAO != null) {
-                TableInfo depInfo =
-                    depDAO.toTableInfo(true, dep.getDependencyCatalog(), dep.getDependencySchema());
-                RepositoryUtils.attachProperties(
-                    depInfo, depInfo.getTableId(), Constants.TABLE, session);
-                tableResults.add(new TableResult().table(depInfo));
-              } else {
-                String depFullName =
-                    dep.getDependencyCatalog()
-                        + "."
-                        + dep.getDependencySchema()
-                        + "."
-                        + dep.getDependencyName();
-                tableResults.add(
-                    new TableResult()
-                        .reason(
-                            new MissingReason()
-                                .name(depFullName)
-                                .reason("Dependency table not found")));
-              }
-            }
-          }
-
-          return response.tables(tableResults);
-        },
-        "Failed to get metadata snapshot",
         /* readOnly = */ true);
   }
 

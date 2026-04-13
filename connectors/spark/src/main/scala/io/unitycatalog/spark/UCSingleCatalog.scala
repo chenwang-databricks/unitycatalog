@@ -449,11 +449,6 @@ object UCSingleCatalog {
   val LOAD_DELTA_CATALOG = ThreadLocal.withInitial[Boolean](() => true)
   val DELTA_CATALOG_LOADED = ThreadLocal.withInitial[Boolean](() => false)
 
-  private[spark] val metadataSnapshotCache: ThreadLocal[java.util.HashMap[String, TableInfo]] =
-    ThreadLocal.withInitial[java.util.HashMap[String, TableInfo]](
-      () => new java.util.HashMap[String, TableInfo]()
-    )
-
   /**
    * Returns any user-configured {@code fs.<scheme>.impl} values from the current Spark session.
    *
@@ -590,16 +585,14 @@ private class UCProxy(
 
   override def loadTable(ident: Identifier): Table = {
     val fullName = UCSingleCatalog.fullTableNameForApi(this.name, ident)
-    val t = Option(UCSingleCatalog.metadataSnapshotCache.get().remove(fullName)).getOrElse {
-      try {
-        tablesApi.getTable(
-          fullName,
-          /* readStreamingTableAsManaged = */ true,
-          /* readMaterializedViewAsManaged = */ true)
-      } catch {
-        case e: ApiException if e.getCode == 404 =>
-          throw new NoSuchTableException(ident)
-      }
+    val t = try {
+      tablesApi.getTable(
+        fullName,
+        /* readStreamingTableAsManaged = */ true,
+        /* readMaterializedViewAsManaged = */ true)
+    } catch {
+      case e: ApiException if e.getCode == 404 =>
+        throw new NoSuchTableException(ident)
     }
 
     if (t.getTableType == TableType.METRIC_VIEW) {
@@ -619,9 +612,6 @@ private class UCProxy(
     val tableId = t.getTableId
     var tableOp = TableOperation.READ_WRITE
     val credRequest = new GenerateTemporaryTableCredential().tableId(tableId).operation(tableOp)
-    org.apache.spark.sql.catalyst.analysis.AnalysisContext.get.metricViewId.foreach { viewId =>
-      credRequest.setDependent(new Dependent().table(new TableDependent().tableId(viewId)))
-    }
     val temporaryCredentials = {
       try {
         temporaryCredentialsApi.generateTemporaryTableCredentials(credRequest)
@@ -632,10 +622,6 @@ private class UCProxy(
             tableOp = TableOperation.READ
             val readCredRequest = new GenerateTemporaryTableCredential()
               .tableId(tableId).operation(tableOp)
-            org.apache.spark.sql.catalyst.analysis.AnalysisContext.get.metricViewId.foreach { viewId =>
-              readCredRequest.setDependent(
-                new Dependent().table(new TableDependent().tableId(viewId)))
-            }
             temporaryCredentialsApi.generateTemporaryTableCredentials(readCredRequest)
           } catch {
             case e: ApiException =>
@@ -698,37 +684,6 @@ private class UCProxy(
     } else {
       Array.empty[StructField]
     }
-
-    try {
-      val fullName = UCSingleCatalog.fullTableNameForApi(this.name, ident)
-      val securable = new Securable()
-        .`type`(SecurableType.TABLE)
-        .fullName(fullName)
-      val request = new MetadataAndPermissionsSnapshotRequest()
-        .securables(java.util.List.of(securable))
-        .includeViewDependencyExpansion(true)
-      val response = tablesApi.getMetadataAndPermissionsSnapshot(request)
-      val metadata = response.getMetadata
-      if (metadata != null && metadata.getTables != null) {
-        metadata.getTables.asScala.foreach { tableResult =>
-          val depTable = tableResult.getTable
-          if (depTable != null) {
-            val depFullName =
-              s"${depTable.getCatalogName}.${depTable.getSchemaName}.${depTable.getName}"
-            val requestedFullName = fullName
-            if (depFullName != requestedFullName) {
-              UCSingleCatalog.metadataSnapshotCache.get().put(depFullName, depTable)
-            }
-          }
-        }
-      }
-    } catch {
-      case e: Exception =>
-        logWarning(s"Failed to get metadata snapshot for ${t.getName}, " +
-          s"source table resolution will fall back to direct getTable calls", e)
-    }
-
-    org.apache.spark.sql.catalyst.analysis.AnalysisContext.setMetricViewId(t.getTableId)
 
     val props = Option(t.getProperties).map(_.asScala.toMap).getOrElse(Map.empty)
 
