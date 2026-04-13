@@ -177,7 +177,7 @@ public class UnityCatalogServer {
     MetastoreService metastoreService = new MetastoreService(repositories);
     // TODO: combine these into a single service in a follow-up PR
     TemporaryTableCredentialsService temporaryTableCredentialsService =
-        new TemporaryTableCredentialsService(storageCredentialVendor, authorizer, repositories);
+        new TemporaryTableCredentialsService(storageCredentialVendor, repositories);
     TemporaryVolumeCredentialsService temporaryVolumeCredentialsService =
         new TemporaryVolumeCredentialsService(storageCredentialVendor, repositories);
     TemporaryModelVersionCredentialsService temporaryModelVersionCredentialsService =

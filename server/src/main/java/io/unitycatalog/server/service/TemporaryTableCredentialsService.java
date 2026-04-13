@@ -3,10 +3,9 @@ package io.unitycatalog.server.service;
 import com.linecorp.armeria.common.HttpResponse;
 import com.linecorp.armeria.server.annotation.ExceptionHandler;
 import com.linecorp.armeria.server.annotation.Post;
-import io.unitycatalog.server.auth.UnityCatalogAuthorizer;
 import io.unitycatalog.server.auth.annotation.AuthorizeExpression;
-import io.unitycatalog.server.auth.annotation.AuthorizeKey;
 import io.unitycatalog.server.auth.annotation.AuthorizeResourceKey;
+import io.unitycatalog.server.auth.annotation.AuthorizeKey;
 import io.unitycatalog.server.exception.GlobalExceptionHandler;
 import io.unitycatalog.server.model.GenerateTemporaryTableCredential;
 import io.unitycatalog.server.model.TableOperation;
@@ -26,14 +25,11 @@ import static io.unitycatalog.server.service.credential.CredentialContext.Privil
 
 @ExceptionHandler(GlobalExceptionHandler.class)
 public class TemporaryTableCredentialsService {
-
   private final TableRepository tableRepository;
   private final StorageCredentialVendor storageCredentialVendor;
 
-  public TemporaryTableCredentialsService(
-      StorageCredentialVendor storageCredentialVendor,
-      UnityCatalogAuthorizer authorizer,
-      Repositories repositories) {
+  public TemporaryTableCredentialsService(StorageCredentialVendor storageCredentialVendor,
+                                          Repositories repositories) {
     this.storageCredentialVendor = storageCredentialVendor;
     this.tableRepository = repositories.getTableRepository();
   }
@@ -52,11 +48,10 @@ public class TemporaryTableCredentialsService {
       @AuthorizeKey(key = "operation")
       GenerateTemporaryTableCredential generateTemporaryTableCredential) {
     String tableId = generateTemporaryTableCredential.getTableId();
-
     NormalizedURL storageLocation = tableRepository.getStorageLocationForTableOrStagingTable(
         UUID.fromString(tableId));
     return HttpResponse.ofJson(storageCredentialVendor.vendCredential(storageLocation,
-        tableOperationToPrivileges(generateTemporaryTableCredential.getOperation())));
+            tableOperationToPrivileges(generateTemporaryTableCredential.getOperation())));
   }
 
   private Set<CredentialContext.Privilege> tableOperationToPrivileges(
