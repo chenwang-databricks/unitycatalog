@@ -103,12 +103,7 @@ class UCSingleCatalog
       ident: Identifier,
       tableInfo: org.apache.spark.sql.connector.catalog.TableInfo): Table = {
     UCSingleCatalog.checkUnsupportedNestedNamespace(ident.namespace())
-    val tableType = tableInfo.tableType()
-    if (TableSummary.METRIC_VIEW_TABLE_TYPE.equals(tableType)) {
-      return delegate.asInstanceOf[UCProxy].createMetricViewFromTableInfo(
-        ident, this.name, tableInfo)
-    }
-    super.createTable(ident, tableInfo)
+    delegate.asInstanceOf[UCProxy].createTableFromTableInfo(ident, this.name, tableInfo)
   }
 
   override def createTable(
@@ -715,10 +710,11 @@ private class UCProxy(
   }
 
   /**
-   * Creates a metric view using structured fields from Spark's TableInfo.
-   * Called by UCSingleCatalog when tableInfo.tableType() is METRIC_VIEW.
+   * Creates a table from Spark's structured TableInfo, forwarding all fields
+   * (tableType, viewDefinition, viewDependencies, columns, properties) to the
+   * UC server. Works for any table type including METRIC_VIEW.
    */
-  def createMetricViewFromTableInfo(
+  def createTableFromTableInfo(
       ident: Identifier,
       catalogName: String,
       tableInfo: org.apache.spark.sql.connector.catalog.TableInfo): Table = {
@@ -726,8 +722,11 @@ private class UCProxy(
     ct.setName(ident.name())
     ct.setSchemaName(ident.namespace().head)
     ct.setCatalogName(catalogName)
-    ct.setTableType(TableType.METRIC_VIEW)
-    ct.setViewDefinition(tableInfo.viewDefinition())
+
+    Option(tableInfo.tableType()).foreach { tt =>
+      ct.setTableType(TableType.fromValue(tt))
+    }
+    Option(tableInfo.viewDefinition()).foreach(ct.setViewDefinition(_))
     Option(tableInfo.properties().get("comment")).foreach(ct.setComment(_))
 
     val columns: Seq[ColumnInfo] = tableInfo.columns().toSeq.zipWithIndex.map { case (col, i) =>
