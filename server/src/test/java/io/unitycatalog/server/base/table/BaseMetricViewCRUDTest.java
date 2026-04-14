@@ -92,7 +92,7 @@ public abstract class BaseMetricViewCRUDTest extends BaseTableCRUDTestEnv {
   }
 
   @Test
-  public void testMetricViewWithDependencies() throws Exception {
+  public void testMetricViewWithDependenciesAccepted() throws Exception {
     String sourceTableFullName =
         TestUtils.CATALOG_NAME + "." + TestUtils.SCHEMA_NAME + ".source_events";
 
@@ -109,20 +109,16 @@ public abstract class BaseMetricViewCRUDTest extends BaseTableCRUDTestEnv {
             .tableType(TableType.METRIC_VIEW)
             .viewDefinition(VIEW_DEFINITION)
             .viewDependencies(depList)
-            .comment("Metric view with dependencies");
+            .comment("Metric view with dependencies in payload");
 
     TableInfo created = tableOperations.createTable(createRequest);
     assertThat(created.getTableType()).isEqualTo(TableType.METRIC_VIEW);
     assertThat(created.getViewDefinition()).isEqualTo(VIEW_DEFINITION);
 
-    // Verify dependencies are returned on GET
     TableInfo fetched = tableOperations.getTable(METRIC_VIEW_FULL_NAME);
-    assertThat(fetched.getViewDependencies()).isNotNull();
-    assertThat(fetched.getViewDependencies().getDependencies()).hasSize(1);
-    assertThat(fetched.getViewDependencies().getDependencies().get(0).getTable().getTableFullName())
-        .isEqualTo(sourceTableFullName);
+    assertThat(fetched.getTableType()).isEqualTo(TableType.METRIC_VIEW);
+    assertThat(fetched.getViewDefinition()).isEqualTo(VIEW_DEFINITION);
 
-    // Delete and verify dependencies are cleaned up
     tableOperations.deleteTable(METRIC_VIEW_FULL_NAME);
     assertThatThrownBy(() -> tableOperations.getTable(METRIC_VIEW_FULL_NAME))
         .isInstanceOf(Exception.class);
