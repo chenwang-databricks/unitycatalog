@@ -103,7 +103,7 @@ class UCSingleCatalog
       ident: Identifier,
       tableInfo: org.apache.spark.sql.connector.catalog.TableInfo): Table = {
     UCSingleCatalog.checkUnsupportedNestedNamespace(ident.namespace())
-    delegate.asInstanceOf[UCProxy].createTableFromTableInfo(ident, this.name, tableInfo)
+    delegate.createTable(ident, tableInfo)
   }
 
   override def createTable(
@@ -709,19 +709,14 @@ private class UCProxy(
       .asInstanceOf[Table]
   }
 
-  /**
-   * Creates a table from Spark's structured TableInfo, forwarding all fields
-   * (tableType, viewDefinition, viewDependencies, columns, properties) to the
-   * UC server. Works for any table type including METRIC_VIEW.
-   */
-  def createTableFromTableInfo(
+  override def createTable(
       ident: Identifier,
-      catalogName: String,
       tableInfo: org.apache.spark.sql.connector.catalog.TableInfo): Table = {
+    UCSingleCatalog.checkUnsupportedNestedNamespace(ident.namespace())
     val ct = new CreateTable()
     ct.setName(ident.name())
     ct.setSchemaName(ident.namespace().head)
-    ct.setCatalogName(catalogName)
+    ct.setCatalogName(this.name)
 
     Option(tableInfo.tableType()).foreach { tt =>
       ct.setTableType(TableType.fromValue(tt))
