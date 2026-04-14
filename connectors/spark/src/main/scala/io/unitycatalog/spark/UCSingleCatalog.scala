@@ -713,27 +713,14 @@ private class UCProxy(
       ident: Identifier,
       tableInfo: org.apache.spark.sql.connector.catalog.TableInfo): Table = {
     UCSingleCatalog.checkUnsupportedNestedNamespace(ident.namespace())
-    val ct = new CreateTable()
-    ct.setName(ident.name())
-    ct.setSchemaName(ident.namespace().head)
-    ct.setCatalogName(this.name)
+    val ct = initCreateTable(ident, tableInfo.properties())
 
     Option(tableInfo.tableType()).foreach { tt =>
       ct.setTableType(TableType.fromValue(tt))
     }
     Option(tableInfo.viewDefinition()).foreach(ct.setViewDefinition(_))
-    Option(tableInfo.properties().get("comment")).foreach(ct.setComment(_))
 
-    val columns: Seq[ColumnInfo] = tableInfo.columns().toSeq.zipWithIndex.map { case (col, i) =>
-      val column = new ColumnInfo()
-      column.setName(col.name())
-      column.setNullable(col.nullable())
-      column.setTypeText(col.dataType().catalogString)
-      column.setTypeName(convertDataTypeToTypeName(col.dataType()))
-      column.setTypeJson(col.dataType().json)
-      column.setPosition(i)
-      column
-    }
+    val columns = convertColumns(tableInfo.columns())
     ct.setColumns(columns.asJava)
 
     Option(tableInfo.viewDependencies()).foreach { sparkDepList =>
@@ -757,25 +744,15 @@ private class UCProxy(
       ct.setViewDependencies(ucDepList)
     }
 
-    val reservedKeys = Set("comment", "provider")
-    val serverProps = tableInfo.properties().asScala
-      .filterKeys(!reservedKeys.contains(_))
-      .toMap.asJava
-    ct.setProperties(serverProps)
-
     tablesApi.createTable(ct)
     loadTable(ident)
   }
 
   override def createTable(ident: Identifier, schema: StructType, partitions: Array[Transform], properties: util.Map[String, String]): Table = {
     UCSingleCatalog.checkUnsupportedNestedNamespace(ident.namespace())
-
     UCSingleCatalog.requireProviderSpecified("CREATE TABLE", properties)
 
-    val createTable = new CreateTable()
-    createTable.setName(ident.name())
-    createTable.setSchemaName(ident.namespace().head)
-    createTable.setCatalogName(this.name)
+    val ct = initCreateTable(ident, properties)
 
     val hasExternalClause = properties.containsKey(TableCatalog.PROP_EXTERNAL)
     val storageLocation = properties.get(TableCatalog.PROP_LOCATION)
@@ -788,11 +765,11 @@ private class UCProxy(
       if (!format.equalsIgnoreCase(DataSourceFormat.DELTA.name)) {
         throw new ApiException("Unity Catalog does not support non-Delta managed table.")
       }
-      createTable.setTableType(TableType.MANAGED)
+      ct.setTableType(TableType.MANAGED)
     } else {
-      createTable.setTableType(TableType.EXTERNAL)
+      ct.setTableType(TableType.EXTERNAL)
     }
-    createTable.setStorageLocation(storageLocation)
+    ct.setStorageLocation(storageLocation)
 
     val partitionColNames: Seq[String] = partitions.flatMap { t =>
       t.name() match {
@@ -822,16 +799,38 @@ private class UCProxy(
       if (partitionIdx >= 0) column.setPartitionIndex(partitionIdx)
       column
     }
-    val comment = Option(properties.get(TableCatalog.PROP_COMMENT))
-    comment.foreach(createTable.setComment(_))
-    createTable.setColumns(columns)
-    createTable.setDataSourceFormat(convertDatasourceFormat(format))
-    // Do not send the V2 table properties as they are made part of the `createTable` already.
-    val propertiesToServer =
-      properties.view.filterKeys(!UCTableProperties.V2_TABLE_PROPERTIES.contains(_)).toMap
-    createTable.setProperties(propertiesToServer)
-    tablesApi.createTable(createTable)
+    ct.setColumns(columns)
+    ct.setDataSourceFormat(convertDatasourceFormat(format))
+    tablesApi.createTable(ct)
     loadTable(ident)
+  }
+
+  private def initCreateTable(
+      ident: Identifier,
+      properties: util.Map[String, String]): CreateTable = {
+    val ct = new CreateTable()
+    ct.setName(ident.name())
+    ct.setSchemaName(ident.namespace().head)
+    ct.setCatalogName(this.name)
+    Option(properties.get(TableCatalog.PROP_COMMENT)).foreach(ct.setComment(_))
+    val serverProps =
+      properties.view.filterKeys(!UCTableProperties.V2_TABLE_PROPERTIES.contains(_)).toMap
+    ct.setProperties(serverProps)
+    ct
+  }
+
+  private def convertColumns(
+      columns: Array[org.apache.spark.sql.connector.catalog.Column]): Seq[ColumnInfo] = {
+    columns.toSeq.zipWithIndex.map { case (col, i) =>
+      val column = new ColumnInfo()
+      column.setName(col.name())
+      column.setNullable(col.nullable())
+      column.setTypeText(col.dataType().catalogString)
+      column.setTypeName(convertDataTypeToTypeName(col.dataType()))
+      column.setTypeJson(col.dataType().json)
+      column.setPosition(i)
+      column
+    }
   }
 
   private def convertDatasourceFormat(format: String): DataSourceFormat = {
