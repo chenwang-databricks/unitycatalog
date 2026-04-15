@@ -228,10 +228,16 @@ public class TableRepository {
               throw new BaseException(
                   ErrorCode.INVALID_ARGUMENT, "view_definition is required for metric view");
             }
+            DependencyList viewDeps = createTable.getViewDependencies();
+            if (viewDeps == null
+                || viewDeps.getDependencies() == null
+                || viewDeps.getDependencies().isEmpty()) {
+              throw new BaseException(
+                  ErrorCode.INVALID_ARGUMENT, "view_dependencies is required for metric view");
+            }
             storageLocation = null;
             tableID = UUID.randomUUID().toString();
-            DependencyList viewDeps = createTable.getViewDependencies();
-            if (viewDeps != null && viewDeps.getDependencies() != null) {
+            if (viewDeps.getDependencies() != null) {
               UUID tableUUID = UUID.fromString(tableID);
               List<DependencyDAO> depDAOs =
                   viewDeps.getDependencies().stream()

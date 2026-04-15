@@ -20,35 +20,59 @@ public abstract class BaseMetricViewCRUDTest extends BaseTableCRUDTestEnv {
   protected static final String METRIC_VIEW_NAME = "uc_test_metric_view";
   protected static final String METRIC_VIEW_FULL_NAME =
       TestUtils.CATALOG_NAME + "." + TestUtils.SCHEMA_NAME + "." + METRIC_VIEW_NAME;
-  protected static final String VIEW_DEFINITION =
+  protected static final String SOURCE_TABLE_FULL_NAME =
+      TestUtils.CATALOG_NAME + "." + TestUtils.SCHEMA_NAME + ".source_events";
+
+  protected static final String VIEW_DEFINITION_ASSET_SOURCE =
       "version: \"0.1\"\n"
           + "source: "
-          + TestUtils.CATALOG_NAME
-          + "."
-          + TestUtils.SCHEMA_NAME
-          + ".source_events\n"
+          + SOURCE_TABLE_FULL_NAME
+          + "\n"
           + "dimensions:\n"
           + "  - name: event_day\n"
           + "    expr: date_trunc('day', event_time)\n"
           + "measures:\n"
           + "  - name: event_count\n"
           + "    expr: count(*)";
+
+  protected static final String VIEW_DEFINITION_SQL_SOURCE =
+      "version: \"0.1\"\n"
+          + "source: SELECT * FROM "
+          + SOURCE_TABLE_FULL_NAME
+          + " WHERE status = 'active'\n"
+          + "dimensions:\n"
+          + "  - name: region\n"
+          + "    expr: region\n"
+          + "measures:\n"
+          + "  - name: total_amount\n"
+          + "    expr: SUM(amount)";
+
   protected static final Map<String, String> PROPERTIES =
       Map.of("team", "analytics", "refresh", "daily");
+
+  private static DependencyList makeDependencyList(String... tableFullNames) {
+    DependencyList depList = new DependencyList();
+    depList.setDependencies(
+        java.util.Arrays.stream(tableFullNames)
+            .map(name -> new Dependency().table(new TableDependency().tableFullName(name)))
+            .collect(java.util.stream.Collectors.toList()));
+    return depList;
+  }
 
   @Test
   public void testMetricViewCRUD() throws Exception {
     assertThatThrownBy(() -> tableOperations.getTable(METRIC_VIEW_FULL_NAME))
         .isInstanceOf(Exception.class);
 
-    // --- Create ---
+    // --- Create with asset source ---
     CreateTable createRequest =
         new CreateTable()
             .name(METRIC_VIEW_NAME)
             .catalogName(TestUtils.CATALOG_NAME)
             .schemaName(TestUtils.SCHEMA_NAME)
             .tableType(TableType.METRIC_VIEW)
-            .viewDefinition(VIEW_DEFINITION)
+            .viewDefinition(VIEW_DEFINITION_ASSET_SOURCE)
+            .viewDependencies(makeDependencyList(SOURCE_TABLE_FULL_NAME))
             .comment("Daily event counts by day")
             .properties(PROPERTIES);
 
@@ -57,20 +81,24 @@ public abstract class BaseMetricViewCRUDTest extends BaseTableCRUDTestEnv {
     assertThat(created.getCatalogName()).isEqualTo(TestUtils.CATALOG_NAME);
     assertThat(created.getSchemaName()).isEqualTo(TestUtils.SCHEMA_NAME);
     assertThat(created.getTableType()).isEqualTo(TableType.METRIC_VIEW);
-    assertThat(created.getViewDefinition()).isEqualTo(VIEW_DEFINITION);
+    assertThat(created.getViewDefinition()).isEqualTo(VIEW_DEFINITION_ASSET_SOURCE);
     assertThat(created.getTableId()).isNotNull();
     assertThat(created.getStorageLocation())
         .as("Metric views should have no storage location")
         .isNull();
 
-    // --- Get ---
+    // --- Get and verify dependencies round-trip ---
     TableInfo fetched = tableOperations.getTable(METRIC_VIEW_FULL_NAME);
     assertThat(fetched.getName()).isEqualTo(METRIC_VIEW_NAME);
     assertThat(fetched.getTableType()).isEqualTo(TableType.METRIC_VIEW);
-    assertThat(fetched.getViewDefinition()).isEqualTo(VIEW_DEFINITION);
+    assertThat(fetched.getViewDefinition()).isEqualTo(VIEW_DEFINITION_ASSET_SOURCE);
     assertThat(fetched.getComment()).isEqualTo("Daily event counts by day");
     assertThat(fetched.getCreatedAt()).isNotNull();
     assertThat(fetched.getTableId()).isNotNull();
+    assertThat(fetched.getViewDependencies()).isNotNull();
+    assertThat(fetched.getViewDependencies().getDependencies()).hasSize(1);
+    assertThat(fetched.getViewDependencies().getDependencies().get(0).getTable().getTableFullName())
+        .isEqualTo(SOURCE_TABLE_FULL_NAME);
 
     // Verify properties round-trip
     assertThat(fetched.getProperties()).isNotNull();
@@ -87,15 +115,6 @@ public abstract class BaseMetricViewCRUDTest extends BaseTableCRUDTestEnv {
                 METRIC_VIEW_NAME.equals(t.getName())
                     && TableType.METRIC_VIEW.equals(t.getTableType()));
 
-    // --- Create without view_definition should fail ---
-    CreateTable badRequest =
-        new CreateTable()
-            .name("bad_metric_view")
-            .catalogName(TestUtils.CATALOG_NAME)
-            .schemaName(TestUtils.SCHEMA_NAME)
-            .tableType(TableType.METRIC_VIEW);
-    assertThatThrownBy(() -> tableOperations.createTable(badRequest)).isInstanceOf(Exception.class);
-
     // --- Delete ---
     tableOperations.deleteTable(METRIC_VIEW_FULL_NAME);
     assertThatThrownBy(() -> tableOperations.getTable(METRIC_VIEW_FULL_NAME))
@@ -103,14 +122,8 @@ public abstract class BaseMetricViewCRUDTest extends BaseTableCRUDTestEnv {
   }
 
   @Test
-  public void testMetricViewWithDependencies() throws Exception {
-    String sourceTableFullName =
-        TestUtils.CATALOG_NAME + "." + TestUtils.SCHEMA_NAME + ".source_events";
-
-    Dependency dep = new Dependency();
-    dep.setTable(new TableDependency().tableFullName(sourceTableFullName));
-    DependencyList depList = new DependencyList();
-    depList.setDependencies(List.of(dep));
+  public void testMetricViewWithSqlSource() throws Exception {
+    String otherTable = TestUtils.CATALOG_NAME + "." + TestUtils.SCHEMA_NAME + ".other_table";
 
     CreateTable createRequest =
         new CreateTable()
@@ -118,22 +131,42 @@ public abstract class BaseMetricViewCRUDTest extends BaseTableCRUDTestEnv {
             .catalogName(TestUtils.CATALOG_NAME)
             .schemaName(TestUtils.SCHEMA_NAME)
             .tableType(TableType.METRIC_VIEW)
-            .viewDefinition(VIEW_DEFINITION)
-            .viewDependencies(depList)
-            .comment("Metric view with dependencies");
+            .viewDefinition(VIEW_DEFINITION_SQL_SOURCE)
+            .viewDependencies(makeDependencyList(SOURCE_TABLE_FULL_NAME))
+            .comment("Metric view with SQL source");
 
     TableInfo created = tableOperations.createTable(createRequest);
     assertThat(created.getTableType()).isEqualTo(TableType.METRIC_VIEW);
-    assertThat(created.getViewDefinition()).isEqualTo(VIEW_DEFINITION);
+    assertThat(created.getViewDefinition()).isEqualTo(VIEW_DEFINITION_SQL_SOURCE);
 
     TableInfo fetched = tableOperations.getTable(METRIC_VIEW_FULL_NAME);
     assertThat(fetched.getViewDependencies()).isNotNull();
     assertThat(fetched.getViewDependencies().getDependencies()).hasSize(1);
-    assertThat(fetched.getViewDependencies().getDependencies().get(0).getTable().getTableFullName())
-        .isEqualTo(sourceTableFullName);
 
     tableOperations.deleteTable(METRIC_VIEW_FULL_NAME);
-    assertThatThrownBy(() -> tableOperations.getTable(METRIC_VIEW_FULL_NAME))
-        .isInstanceOf(Exception.class);
+  }
+
+  @Test
+  public void testCreateMetricViewWithoutDefinitionFails() throws Exception {
+    CreateTable badRequest =
+        new CreateTable()
+            .name(METRIC_VIEW_NAME)
+            .catalogName(TestUtils.CATALOG_NAME)
+            .schemaName(TestUtils.SCHEMA_NAME)
+            .tableType(TableType.METRIC_VIEW)
+            .viewDependencies(makeDependencyList(SOURCE_TABLE_FULL_NAME));
+    assertThatThrownBy(() -> tableOperations.createTable(badRequest)).isInstanceOf(Exception.class);
+  }
+
+  @Test
+  public void testCreateMetricViewWithoutDependenciesFails() throws Exception {
+    CreateTable badRequest =
+        new CreateTable()
+            .name(METRIC_VIEW_NAME)
+            .catalogName(TestUtils.CATALOG_NAME)
+            .schemaName(TestUtils.SCHEMA_NAME)
+            .tableType(TableType.METRIC_VIEW)
+            .viewDefinition(VIEW_DEFINITION_ASSET_SOURCE);
+    assertThatThrownBy(() -> tableOperations.createTable(badRequest)).isInstanceOf(Exception.class);
   }
 }
