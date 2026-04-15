@@ -638,7 +638,7 @@ private class UCProxy(
         enableServerSidePlanningConfig(identifier)
       }
 
-      val credProps = if (temporaryCredentials == null) {
+      val extraSerdeProps = if (temporaryCredentials == null) {
         Map.empty[String, String].asJava
       } else {
         CredPropsUtil.createTableCredProps(
@@ -656,7 +656,7 @@ private class UCProxy(
 
       val storageFormat = CatalogStorageFormat.empty.copy(
         locationUri = Some(locationUri),
-        properties = t.getProperties.asScala.toMap ++ credProps
+        properties = t.getProperties.asScala.toMap ++ extraSerdeProps
       )
       (storageFormat, Map.empty[String, String])
     } else {
