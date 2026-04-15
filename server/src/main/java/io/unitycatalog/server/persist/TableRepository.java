@@ -290,11 +290,6 @@ public class TableRepository {
         /* readOnly = */ false);
   }
 
-  /** Retrieves a TableInfoDAO by its ID within an existing session/transaction. */
-  public TableInfoDAO getTableById(Session session, UUID tableId) {
-    return session.get(TableInfoDAO.class, tableId);
-  }
-
   public TableInfoDAO findBySchemaIdAndName(Session session, UUID schemaId, String name) {
     String hql = "FROM TableInfoDAO t WHERE t.schemaId = :schemaId AND t.name = :name";
     Query<TableInfoDAO> query = session.createQuery(hql, TableInfoDAO.class);
