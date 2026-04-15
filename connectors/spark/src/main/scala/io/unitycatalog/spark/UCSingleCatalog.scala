@@ -593,21 +593,14 @@ private class UCProxy(
     val identifier = TableIdentifier(t.getName, Some(t.getSchemaName), Some(t.getCatalogName))
     val hasStorage = t.getStorageLocation != null
 
-    // Columns
     val partitionCols = scala.collection.mutable.ArrayBuffer.empty[(String, Int)]
-    val fields = if (t.getColumns != null) {
-      t.getColumns.asScala.map { col =>
-        if (hasStorage) {
-          Option(col.getPartitionIndex).foreach { index =>
-            partitionCols += col.getName -> index
-          }
-        }
-        StructField(col.getName, DataType.fromDDL(col.getTypeText), col.getNullable)
-          .withComment(col.getComment)
-      }.toArray
-    } else {
-      Array.empty[StructField]
-    }
+    val fields = t.getColumns.asScala.map { col =>
+      Option(col.getPartitionIndex).foreach { index =>
+        partitionCols += col.getName -> index
+      }
+      StructField(col.getName, DataType.fromDDL(col.getTypeText), col.getNullable)
+        .withComment(col.getComment)
+    }.toArray
 
     // Credential vending -- only for tables with storage
     val (storage, extraProps) = if (hasStorage) {
