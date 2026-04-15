@@ -5,9 +5,11 @@ import io.unitycatalog.server.exception.ErrorCode;
 import io.unitycatalog.server.model.ColumnInfo;
 import io.unitycatalog.server.model.CreateTable;
 import io.unitycatalog.server.model.DataSourceFormat;
+import io.unitycatalog.server.model.DependencyList;
 import io.unitycatalog.server.model.ListTablesResponse;
 import io.unitycatalog.server.model.TableInfo;
 import io.unitycatalog.server.model.TableType;
+import io.unitycatalog.server.persist.dao.DependencyDAO;
 import io.unitycatalog.server.persist.dao.PropertyDAO;
 import io.unitycatalog.server.persist.dao.SchemaInfoDAO;
 import io.unitycatalog.server.persist.dao.StagingTableDAO;
@@ -151,6 +153,7 @@ public class TableRepository {
           TableInfo tableInfo = tableInfoDAO.toTableInfo(true, catalogName, schemaName);
           RepositoryUtils.attachProperties(
               tableInfo, tableInfo.getTableId(), Constants.TABLE, session);
+          attachDependencies(tableInfo, tableInfoDAO, session);
           return tableInfo;
         },
         "Failed to get table",
@@ -229,6 +232,17 @@ public class TableRepository {
             }
             storageLocation = null;
             tableID = UUID.randomUUID().toString();
+            DependencyList viewDeps = createTable.getViewDependencies();
+            if (viewDeps != null && viewDeps.getDependencies() != null) {
+              UUID tableUUID = UUID.fromString(tableID);
+              List<DependencyDAO> depDAOs =
+                  viewDeps.getDependencies().stream()
+                      .map(dep -> DependencyDAO.from(dep, tableUUID, "TABLE"))
+                      .collect(Collectors.toList());
+              repositories
+                  .getDependencyRepository()
+                  .createDependencies(session, tableUUID, "TABLE", depDAOs);
+            }
           } else if (tableType == TableType.STREAMING_TABLE) {
             throw new BaseException(
                 ErrorCode.INVALID_ARGUMENT, "STREAMING TABLE creation is not supported yet.");
@@ -360,6 +374,7 @@ public class TableRepository {
         RepositoryUtils.attachProperties(
             tableInfo, tableInfo.getTableId(), Constants.TABLE, session);
       }
+      attachDependencies(tableInfo, tableInfoDAO, session);
       result.add(tableInfo);
     }
     return new ListTablesResponse().tables(result).nextPageToken(nextPageToken);
@@ -402,8 +417,26 @@ public class TableRepository {
           .getDeltaCommitRepository()
           .permanentlyDeleteTableCommits(session, tableInfoDAO.getId());
     }
+    if ("METRIC_VIEW".equals(tableInfoDAO.getType())) {
+      repositories
+          .getDependencyRepository()
+          .deleteDependencies(session, tableInfoDAO.getId(), "TABLE");
+    }
     PropertyRepository.findProperties(session, tableInfoDAO.getId(), Constants.TABLE)
         .forEach(session::remove);
     session.remove(tableInfoDAO);
+  }
+
+  private void attachDependencies(TableInfo tableInfo, TableInfoDAO tableInfoDAO, Session session) {
+    if ("METRIC_VIEW".equals(tableInfoDAO.getType())) {
+      List<DependencyDAO> deps =
+          repositories
+              .getDependencyRepository()
+              .getDependencies(session, tableInfoDAO.getId(), "TABLE");
+      if (!deps.isEmpty()) {
+        tableInfo.setViewDependencies(
+            new DependencyList().dependencies(DependencyDAO.toDependencyList(deps)));
+      }
+    }
   }
 }
