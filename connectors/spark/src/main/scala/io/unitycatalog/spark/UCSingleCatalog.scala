@@ -591,99 +591,18 @@ private class UCProxy(
         throw new NoSuchTableException(ident)
     }
 
-    if (t.getTableType == TableType.METRIC_VIEW) {
-      return loadMetricView(t, ident)
-    }
-
     val identifier = TableIdentifier(t.getName, Some(t.getSchemaName), Some(t.getCatalogName))
+    val hasStorage = t.getStorageLocation != null
+
+    // Columns
     val partitionCols = scala.collection.mutable.ArrayBuffer.empty[(String, Int)]
-    val fields = t.getColumns.asScala.map { col =>
-      Option(col.getPartitionIndex).foreach { index =>
-        partitionCols += col.getName -> index
-      }
-      StructField(col.getName, DataType.fromDDL(col.getTypeText), col.getNullable)
-        .withComment(col.getComment)
-    }.toArray
-    val locationUri = CatalogUtils.stringToURI(t.getStorageLocation)
-    val tableId = t.getTableId
-    var tableOp = TableOperation.READ_WRITE
-    val temporaryCredentials = {
-      try {
-        temporaryCredentialsApi
-          .generateTemporaryTableCredentials(
-            // TODO: at this time, we don't know if the table will be read or written. For now we always
-            //       request READ_WRITE credentials as the server doesn't distinguish between READ and
-            //       READ_WRITE credentials as of today. When loading a table, Spark should tell if it's
-            //       for read or write, we can request the proper credential after fixing Spark.
-            new GenerateTemporaryTableCredential().tableId(tableId).operation(tableOp)
-          )
-      }       catch {
-        case e: ApiException =>
-          logWarning(s"READ_WRITE credential generation failed for table $identifier: ${e.getMessage}")
-          try {
-            tableOp = TableOperation.READ
-            temporaryCredentialsApi
-              .generateTemporaryTableCredentials(
-                new GenerateTemporaryTableCredential().tableId(tableId).operation(tableOp)
-              )
-          } catch {
-            case e: ApiException =>
-              logWarning(s"READ credential generation failed for table $identifier: ${e.getMessage}")
-              if (serverSidePlanningEnabled) null else throw e
-          }
-      }
-    }
-
-    if (serverSidePlanningEnabled && temporaryCredentials == null) {
-      enableServerSidePlanningConfig(identifier)
-    }
-
-    val extraSerdeProps = if (temporaryCredentials == null) {
-      Map.empty[String, String].asJava
-    } else {
-      CredPropsUtil.createTableCredProps(
-        renewCredEnabled,
-        credScopedFsEnabled,
-        UCSingleCatalog.sessionHadoopFsImplProps(),
-        locationUri.getScheme,
-        uri.toString,
-        tokenProvider,
-        tableId,
-        tableOp,
-        temporaryCredentials,
-      )
-    }
-
-    val sparkTable = CatalogTable(
-      identifier,
-      tableType = if (t.getTableType == TableType.MANAGED) {
-        CatalogTableType.MANAGED
-      } else {
-        CatalogTableType.EXTERNAL
-      },
-      storage = CatalogStorageFormat.empty.copy(
-        locationUri = Some(locationUri),
-        properties = t.getProperties.asScala.toMap ++ extraSerdeProps
-      ),
-      schema = StructType(fields),
-      provider = Some(t.getDataSourceFormat.getValue.toLowerCase()),
-      createTime = t.getCreatedAt,
-      tracksPartitionsInCatalog = false,
-      partitionColumnNames = partitionCols.sortBy(_._2).map(_._1).toSeq
-    )
-    // Spark separates table lookup and data source resolution. To support Spark native data
-    // sources, here we return the `V1Table` which only contains the table metadata. Spark will
-    // resolve the data source and create scan node later.
-    Class.forName("org.apache.spark.sql.connector.catalog.V1Table")
-      .getDeclaredConstructor(classOf[CatalogTable])
-      .newInstance(sparkTable)
-      .asInstanceOf[Table]
-  }
-
-  private def loadMetricView(t: TableInfo, ident: Identifier): Table = {
-    val identifier = TableIdentifier(t.getName, Some(t.getSchemaName), Some(t.getCatalogName))
     val fields = if (t.getColumns != null) {
       t.getColumns.asScala.map { col =>
+        if (hasStorage) {
+          Option(col.getPartitionIndex).foreach { index =>
+            partitionCols += col.getName -> index
+          }
+        }
         StructField(col.getName, DataType.fromDDL(col.getTypeText), col.getNullable)
           .withComment(col.getComment)
       }.toArray
@@ -691,18 +610,91 @@ private class UCProxy(
       Array.empty[StructField]
     }
 
-    val props = Option(t.getProperties).map(_.asScala.toMap).getOrElse(Map.empty)
+    // Credential vending -- only for tables with storage
+    val (storage, extraProps) = if (hasStorage) {
+      val locationUri = CatalogUtils.stringToURI(t.getStorageLocation)
+      val tableId = t.getTableId
+      var tableOp = TableOperation.READ_WRITE
+      val temporaryCredentials = {
+        try {
+          temporaryCredentialsApi
+            .generateTemporaryTableCredentials(
+              // TODO: at this time, we don't know if the table will be read or written. For now we always
+              //       request READ_WRITE credentials as the server doesn't distinguish between READ and
+              //       READ_WRITE credentials as of today. When loading a table, Spark should tell if it's
+              //       for read or write, we can request the proper credential after fixing Spark.
+              new GenerateTemporaryTableCredential().tableId(tableId).operation(tableOp)
+            )
+        }       catch {
+          case e: ApiException =>
+            logWarning(s"READ_WRITE credential generation failed for table $identifier: ${e.getMessage}")
+            try {
+              tableOp = TableOperation.READ
+              temporaryCredentialsApi
+                .generateTemporaryTableCredentials(
+                  new GenerateTemporaryTableCredential().tableId(tableId).operation(tableOp)
+                )
+            } catch {
+              case e: ApiException =>
+                logWarning(s"READ credential generation failed for table $identifier: ${e.getMessage}")
+                if (serverSidePlanningEnabled) null else throw e
+            }
+        }
+      }
+
+      if (serverSidePlanningEnabled && temporaryCredentials == null) {
+        enableServerSidePlanningConfig(identifier)
+      }
+
+      val credProps = if (temporaryCredentials == null) {
+        Map.empty[String, String].asJava
+      } else {
+        CredPropsUtil.createTableCredProps(
+          renewCredEnabled,
+          credScopedFsEnabled,
+          UCSingleCatalog.sessionHadoopFsImplProps(),
+          locationUri.getScheme,
+          uri.toString,
+          tokenProvider,
+          tableId,
+          tableOp,
+          temporaryCredentials,
+        )
+      }
+
+      val storageFormat = CatalogStorageFormat.empty.copy(
+        locationUri = Some(locationUri),
+        properties = t.getProperties.asScala.toMap ++ credProps
+      )
+      (storageFormat, Map.empty[String, String])
+    } else {
+      (CatalogStorageFormat.empty,
+        Option(t.getProperties).map(_.asScala.toMap).getOrElse(Map.empty))
+    }
+
+    // Table type mapping
+    val catalogTableType = t.getTableType match {
+      case TableType.MANAGED => CatalogTableType.MANAGED
+      case TableType.METRIC_VIEW => CatalogTableType.METRIC_VIEW
+      case _ => CatalogTableType.EXTERNAL
+    }
 
     val sparkTable = CatalogTable(
       identifier,
-      tableType = CatalogTableType.METRIC_VIEW,
-      storage = CatalogStorageFormat.empty,
+      tableType = catalogTableType,
+      storage = storage,
       schema = StructType(fields),
-      viewText = Some(t.getViewDefinition),
-      viewOriginalText = Some(t.getViewDefinition),
-      properties = props,
-      tracksPartitionsInCatalog = false
+      provider = Option(t.getDataSourceFormat).map(_.getValue.toLowerCase()),
+      viewText = Option(t.getViewDefinition),
+      viewOriginalText = Option(t.getViewDefinition),
+      properties = extraProps,
+      createTime = t.getCreatedAt,
+      tracksPartitionsInCatalog = false,
+      partitionColumnNames = partitionCols.sortBy(_._2).map(_._1).toSeq
     )
+    // Spark separates table lookup and data source resolution. To support Spark native data
+    // sources, here we return the `V1Table` which only contains the table metadata. Spark will
+    // resolve the data source and create scan node later.
     Class.forName("org.apache.spark.sql.connector.catalog.V1Table")
       .getDeclaredConstructor(classOf[CatalogTable])
       .newInstance(sparkTable)
