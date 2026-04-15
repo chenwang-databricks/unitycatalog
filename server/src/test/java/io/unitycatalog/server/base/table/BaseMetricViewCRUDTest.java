@@ -21,7 +21,18 @@ public abstract class BaseMetricViewCRUDTest extends BaseTableCRUDTestEnv {
   protected static final String METRIC_VIEW_FULL_NAME =
       TestUtils.CATALOG_NAME + "." + TestUtils.SCHEMA_NAME + "." + METRIC_VIEW_NAME;
   protected static final String VIEW_DEFINITION =
-      "SELECT date_trunc('day', event_time) AS day, count(*) AS event_count FROM events GROUP BY 1";
+      "version: \"0.1\"\n"
+          + "source: "
+          + TestUtils.CATALOG_NAME
+          + "."
+          + TestUtils.SCHEMA_NAME
+          + ".source_events\n"
+          + "dimensions:\n"
+          + "  - name: event_day\n"
+          + "    expr: date_trunc('day', event_time)\n"
+          + "measures:\n"
+          + "  - name: event_count\n"
+          + "    expr: count(*)";
   protected static final Map<String, String> PROPERTIES =
       Map.of("team", "analytics", "refresh", "daily");
 
