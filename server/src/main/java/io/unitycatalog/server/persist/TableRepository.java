@@ -177,11 +177,9 @@ public class TableRepository {
     ValidationUtils.validateSqlObjectName(createTable.getName());
     String callerId = IdentityUtils.findPrincipalEmailAddress();
     List<ColumnInfo> columnInfos =
-        createTable.getColumns() != null
-            ? createTable.getColumns().stream()
-                .map(c -> c.typeText(c.getTypeText().toLowerCase(Locale.ROOT)))
-                .collect(Collectors.toList())
-            : List.of();
+        createTable.getColumns().stream()
+            .map(c -> c.typeText(c.getTypeText().toLowerCase(Locale.ROOT)))
+            .collect(Collectors.toList());
     Long createTime = System.currentTimeMillis();
     String fullName = getTableFullName(createTable);
     LOGGER.debug("Creating table: {}", fullName);
@@ -275,15 +273,13 @@ public class TableRepository {
 
           TableInfoDAO tableInfoDAO = TableInfoDAO.from(tableInfo, schemaId);
           // create columns
-          if (tableInfoDAO.getColumns() != null) {
-            tableInfoDAO
-                .getColumns()
-                .forEach(
-                    c -> {
-                      c.setId(UUID.randomUUID());
-                      c.setTable(tableInfoDAO);
-                    });
-          }
+          tableInfoDAO
+              .getColumns()
+              .forEach(
+                  c -> {
+                    c.setId(UUID.randomUUID());
+                    c.setTable(tableInfoDAO);
+                  });
           // create properties
           PropertyDAO.from(tableInfo.getProperties(), tableInfoDAO.getId(), Constants.TABLE)
               .forEach(session::persist);
