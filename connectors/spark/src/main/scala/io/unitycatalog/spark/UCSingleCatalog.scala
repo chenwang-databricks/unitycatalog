@@ -756,10 +756,6 @@ private class UCProxy(
             ucDep.setTable(
               new io.unitycatalog.client.model.TableDependency()
                 .tableFullName(td.tableFullName()))
-          case fd: org.apache.spark.sql.connector.catalog.FunctionDependency =>
-            ucDep.setFunction(
-              new io.unitycatalog.client.model.FunctionDependency()
-                .functionFullName(fd.functionFullName()))
           case _ =>
         }
         ucDep

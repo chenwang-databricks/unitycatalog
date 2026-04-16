@@ -76,17 +76,6 @@ public class DependencyDAO {
       } else {
         builder.dependencyName(fullName);
       }
-    } else if (dependency.getFunction() != null) {
-      builder.dependencyType("FUNCTION");
-      String fullName = dependency.getFunction().getFunctionFullName();
-      String[] parts = fullName.split("\\.");
-      if (parts.length == 3) {
-        builder.dependencyCatalog(parts[0]);
-        builder.dependencySchema(parts[1]);
-        builder.dependencyName(parts[2]);
-      } else {
-        builder.dependencyName(fullName);
-      }
     }
 
     return builder.build();

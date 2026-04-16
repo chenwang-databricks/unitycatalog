@@ -2082,15 +2082,6 @@ components:
           "$ref": "#/components/schemas/CreateFunction"
       required:
         - function_info
-    FunctionDependency:
-      description: A function that is dependent on a SQL object.
-      type: object
-      required:
-        - function_full_name
-      properties:
-        function_full_name:
-          description: Full name of the dependent function, in the form of __catalog_name__.__schema_name__.__function_name__.
-          type: string
     TableDependency:
       description: A table that is dependent on a SQL object.
       type: object
@@ -2101,14 +2092,11 @@ components:
           description: Full name of the dependent table, in the form of __catalog_name__.__schema_name__.__table_name__.
           type: string
     Dependency:
-      description: A dependency of a SQL object. Either the __table__ field or the
-        __function__ field must be defined.
+      description: A dependency of a SQL object.
       type: object
       properties:
         table:
           "$ref": "#/components/schemas/TableDependency"
-        function:
-          "$ref": "#/components/schemas/FunctionDependency"
     DependencyList:
       description: A list of dependencies.
       type: object
