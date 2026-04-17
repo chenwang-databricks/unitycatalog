@@ -21,7 +21,7 @@ lazy val javacRelease17 = Seq("--release", "17")
 
 lazy val scala213 = "2.13.17"
 
-lazy val deltaVersion = sys.props.getOrElse("deltaVersion", "4.1.0")
+lazy val deltaVersion = "4.1.0"
 lazy val sparkVersion = sys.props.getOrElse("sparkVersion", "4.0.0")
 lazy val sparkMajorMinorVersion = sparkVersion.split("\\.").take(2).mkString(".")
 lazy val hadoopVersion = "3.4.2"
@@ -171,13 +171,14 @@ lazy val controlApi = (project in file("target/control/java"))
   )
 
 lazy val client = (project in file("clients/java"))
+  .enablePlugins(OpenApiGeneratorPlugin)
   .settings(
     name := s"$artifactNamePrefix-client",
     commonSettings,
     javaOnlyReleaseSettings,
     Compile / compile / javacOptions ++= javacRelease11,
     javaCheckstyleTestOnlySettings("dev/checkstyle-config.xml"),
-    // Include generated OpenAPI sources (from both all.yaml and delta.yaml, same output dir)
+    // Include generated OpenAPI sources
     Compile / unmanagedSourceDirectories += (file(".") / "clients" / "java" / "target" / "src" / "main" / "java"),
     libraryDependencies ++= Seq(
       "com.fasterxml.jackson.core" % "jackson-annotations" % jacksonVersion,
@@ -203,7 +204,23 @@ lazy val client = (project in file("clients/java"))
     Test / unmanagedSourceDirectories += (file(".") / "clients" / "java" / "src" / "test" / "java"),
     Test / unmanagedResourceDirectories += (file(".") / "server" / "src" / "test" / "resources"),
 
-    // Generate from both all.yaml and delta.yaml into the same output directory
+    // OpenAPI generation specs
+    openApiInputSpec := (file(".") / "api" / "all.yaml").toString,
+    openApiGeneratorName := "java",
+    openApiOutputDir := (file(".") / "clients" / "java" / "target").toString,
+    openApiApiPackage := s"$orgName.client.api",
+    openApiModelPackage := s"$orgName.client.model",
+    openApiAdditionalProperties := Map(
+      "library" -> "native",
+      "useJakartaEe" -> "true",
+      "hideGenerationTimestamp" -> "true",
+      "openApiNullable" -> "false",
+      "enumUnknownDefaultCase" -> "true"),
+    openApiGenerateApiTests := SettingDisabled,
+    openApiGenerateModelTests := SettingDisabled,
+    openApiGenerateApiDocumentation := SettingDisabled,
+    openApiGenerateModelDocumentation := SettingDisabled,
+    // Define the simple generate command to generate full client codes
     generate := {
       val outputDir = (file(".") / "clients" / "java" / "target").toString
       val commonProps = Map(
@@ -252,48 +269,37 @@ lazy val client = (project in file("clients/java"))
 lazy val prepareGeneration = taskKey[Unit]("Prepare the environment for OpenAPI code generation")
 
 lazy val pythonClient = (project in file("clients/python"))
+  .enablePlugins(OpenApiGeneratorPlugin)
   .disablePlugins(CheckstylePlugin)
   .settings(
     name := s"$artifactNamePrefix-python-client",
     commonSettings,
     skipReleaseSettings,
     Compile / compile := (Compile / compile).dependsOn(generate).value,
+    openApiInputSpec := (baseDirectory.value.getParentFile.getParentFile / "api" / "all.yaml").getAbsolutePath,
+    openApiGeneratorName := "python",
+    openApiOutputDir := (baseDirectory.value / "target").getAbsolutePath,
+    openApiPackageName := s"$artifactNamePrefix.client",
+    openApiAdditionalProperties := Map(
+      "packageVersion" -> s"${version.value.replace("-SNAPSHOT", ".dev0")}",
+      "library"        -> "asyncio"
+    ),
+    openApiGenerateApiTests := SettingDisabled,
+    openApiGenerateModelTests := SettingDisabled,
+    openApiGenerateApiDocumentation := SettingDisabled,
+    openApiGenerateModelDocumentation := SettingDisabled,
 
-    prepareGeneration := PythonClientPostBuild.prepareGeneration(
-      streams.value.log, baseDirectory.value,
-      (baseDirectory.value / "target").getAbsolutePath),
+    prepareGeneration := PythonClientPostBuild.prepareGeneration(streams.value.log, baseDirectory.value, openApiOutputDir.value),
 
     generate := Def.sequential(
       prepareGeneration,
-      Def.task {
-        val outputDir = (baseDirectory.value / "target").getAbsolutePath
-        val commonProps = Map(
-          "packageVersion" -> s"${version.value.replace("-SNAPSHOT", ".dev0")}",
-          "library"        -> "asyncio"
-        )
-        OpenApiHelper.generate(
-          outputDir = outputDir,
-          generatorName = "python",
-          specs = Seq(
-            OpenApiSpec(
-              inputSpec = (baseDirectory.value.getParentFile.getParentFile / "api" / "all.yaml").getAbsolutePath,
-              packageName = s"$artifactNamePrefix.client",
-              additionalProperties = commonProps
-            ),
-            OpenApiSpec(
-              inputSpec = (baseDirectory.value.getParentFile.getParentFile / "api" / "delta.yaml").getAbsolutePath,
-              packageName = s"$artifactNamePrefix.delta",
-              additionalProperties = commonProps,
-              globalProperties = Map("apis" -> "", "models" -> "")
-            )
-          )
-        )
-      },
+      openApiGenerate,
       Def.task {
         val log = streams.value.log
+
         PythonClientPostBuild.processGeneratedFiles(
           log,
-          (baseDirectory.value / "target").getAbsolutePath,
+          openApiOutputDir.value,
           baseDirectory.value,
         )
         log.info("OpenAPI Python client generation completed.")
@@ -302,29 +308,18 @@ lazy val pythonClient = (project in file("clients/python"))
   )
 
 lazy val apiDocs = (project in file("api"))
+  .enablePlugins(OpenApiGeneratorPlugin)
   .disablePlugins(CheckstylePlugin)
   .settings(
     name := s"$artifactNamePrefix-docs",
     skipReleaseSettings,
+    // OpenAPI generation specs
+    openApiInputSpec := (file("api") / "all.yaml").toString,
+    openApiGeneratorName := "markdown",
+    openApiOutputDir := (file("api")).toString,
+    // Define the simple generate command to generate markdown docs
     generate := {
-      OpenApiHelper.generate(
-        outputDir = (file("api")).toString,
-        generatorName = "markdown",
-        specs = Seq(
-          OpenApiSpec(
-            inputSpec = (file("api") / "all.yaml").toString
-          )
-        )
-      )
-      OpenApiHelper.generate(
-        outputDir = (file("api") / "delta-docs").toString,
-        generatorName = "markdown",
-        specs = Seq(
-          OpenApiSpec(
-            inputSpec = (file("api") / "delta.yaml").toString
-          )
-        )
-      )
+      val _ = openApiGenerate.value
     }
   )
 
@@ -444,13 +439,14 @@ lazy val server = (project in file("server"))
     },
     Test / javaOptions += s"-Duser.dir=${(ThisBuild / baseDirectory).value.getAbsolutePath}",
     // Include server and control models in the bin package for server
-    // This will allow us to have a single maven artifact and not multiple (server, server models, control models)
+    // This will allow us to have a single maven artifact and not 3 (server, server models, control models)
     Compile / packageBin / mappings ++= (Compile / packageBin / mappings).value ++
       (serverModels / Compile / packageBin / mappings).value ++
       (controlModels / Compile / packageBin / mappings).value
   )
 
 lazy val serverModels = (project in file("server") / "target" / "models")
+  .enablePlugins(OpenApiGeneratorPlugin)
   .disablePlugins(JavaFormatterPlugin, CheckstylePlugin)
   .settings(
     name := s"$artifactNamePrefix-servermodels",
@@ -462,34 +458,26 @@ lazy val serverModels = (project in file("server") / "target" / "models")
       "jakarta.annotation" % "jakarta.annotation-api" % "3.0.0" % Provided,
       "com.fasterxml.jackson.core" % "jackson-annotations" % jacksonVersion,
     ),
-    // Generate model codes from both all.yaml and delta.yaml into the same output directory.
-    // Both use "resteasy" for minimal server-side models (no client SDK dependencies).
-    // Polymorphic types (TableUpdate, TableRequirement, DataType) use the
-    // discriminator + allOf pattern for proper Jackson deserialization.
+    // OpenAPI generation configs for generating model codes from the spec
+    openApiInputSpec := (file(".") / "api" / "all.yaml").toString,
+    openApiGeneratorName := "java",
+    openApiOutputDir := (file("server") / "target" / "models").toString,
+    openApiValidateSpec := SettingEnabled,
+    openApiGenerateMetadata := SettingDisabled,
+    openApiModelPackage := s"$orgName.server.model",
+    openApiAdditionalProperties := Map(
+      "library" -> "resteasy", // resteasy generates the most minimal models
+      "useJakartaEe" -> "true",
+      "hideGenerationTimestamp" -> "true"
+    ),
+    openApiGlobalProperties := Map("models" -> ""),
+    openApiGenerateApiTests := SettingDisabled,
+    openApiGenerateModelTests := SettingDisabled,
+    openApiGenerateApiDocumentation := SettingDisabled,
+    openApiGenerateModelDocumentation := SettingDisabled,
+    // Define the simple generate command to generate model codes
     generate := {
-      val outputDir = (file("server") / "target" / "models").toString
-      val commonProps = Map(
-        "library" -> "resteasy",
-        "useJakartaEe" -> "true",
-        "hideGenerationTimestamp" -> "true"
-      )
-      OpenApiHelper.generate(
-        outputDir = outputDir,
-        specs = Seq(
-          OpenApiSpec(
-            inputSpec = (file(".") / "api" / "all.yaml").toString,
-            modelPackage = s"$orgName.server.model",
-            additionalProperties = commonProps,
-            globalProperties = Map("models" -> "")
-          ),
-          OpenApiSpec(
-            inputSpec = (file(".") / "api" / "delta.yaml").toString,
-            modelPackage = s"$orgName.server.delta.model",
-            additionalProperties = commonProps,
-            globalProperties = Map("models" -> ""),
-          )
-        )
-      )
+      val _ = openApiGenerate.value
     }
   )
 
@@ -629,6 +617,10 @@ lazy val spark = (project in file("connectors/spark"))
         lombokPath
       )
     },
+    Compile / unmanagedJars ++= {
+      val sparkAssemblyDir = sys.props.get("sparkAssemblyDir").map(file).filter(_.exists)
+      sparkAssemblyDir.toSeq.flatMap(d => (d ** "*.jar").get.classpath)
+    },
     libraryDependencies ++= Seq(
       "org.apache.spark" %% "spark-sql" % sparkVersion % Provided,
       "com.fasterxml.jackson.core" % "jackson-databind" % "2.15.0",
@@ -654,8 +646,9 @@ lazy val spark = (project in file("connectors/spark"))
       "org.apache.hadoop" % "hadoop-aws" % hadoopVersion % Test,
       "org.projectlombok" % "lombok" % "1.18.32" % Test,
       "com.google.cloud.bigdataoss" % "gcs-connector" % "3.0.2" % Test classifier "shaded",
+    ) ++ (if (sparkMajorMinorVersion == "4.0") Seq(
       "io.delta" %% s"delta-spark_$sparkMajorMinorVersion" % deltaVersion % Test,
-    ),
+    ) else Nil),
     dependencyOverrides ++= Seq(
       "com.fasterxml.jackson.core" % "jackson-databind" % "2.15.0",
       "com.fasterxml.jackson.module" %% "jackson-module-scala" % "2.15.0",
@@ -711,7 +704,9 @@ lazy val integrationTests = (project in file("integration-tests"))
       "org.assertj" % "assertj-core" % "3.26.3" % Test,
       "org.projectlombok" % "lombok" % "1.18.32" % Provided,
       "org.apache.spark" %% "spark-sql" % sparkVersion % Test,
+    ) ++ (if (sparkMajorMinorVersion == "4.0") Seq(
       "io.delta" %% s"delta-spark_$sparkMajorMinorVersion" % deltaVersion % Test,
+    ) else Nil) ++ Seq(
       "org.apache.hadoop" % "hadoop-aws" % hadoopVersion % Test,
       "org.apache.hadoop" % "hadoop-azure" % hadoopVersion % Test,
       "com.google.cloud.bigdataoss" % "gcs-connector" % "3.0.2" % Test classifier "shaded",

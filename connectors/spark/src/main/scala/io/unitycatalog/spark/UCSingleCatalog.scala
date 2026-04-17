@@ -25,7 +25,6 @@ import java.util
 import java.util.Locale
 import scala.collection.JavaConverters._
 import scala.collection.convert.ImplicitConversions._
-import scala.collection.mutable.ArrayBuffer
 import scala.language.existentials
 
 /**
@@ -98,6 +97,13 @@ class UCSingleCatalog
 
   override def tableExists(ident: Identifier): Boolean = {
     delegate.tableExists(ident)
+  }
+
+  override def createTable(
+      ident: Identifier,
+      tableInfo: org.apache.spark.sql.connector.catalog.TableInfo): Table = {
+    UCSingleCatalog.checkUnsupportedNestedNamespace(ident.namespace())
+    delegate.createTable(ident, tableInfo)
   }
 
   override def createTable(
@@ -567,14 +573,10 @@ private class UCProxy(
 
     val catalogName = this.name
     val schemaName = namespace.head
-    val tables = ArrayBuffer.empty[Identifier]
-    var pageToken: String = null
-    do {
-      val response = tablesApi.listTables(catalogName, schemaName, /* limit */ 0, pageToken)
-      tables ++= response.getTables.asScala.map(table => Identifier.of(namespace, table.getName))
-      pageToken = response.getNextPageToken
-    } while (pageToken != null && pageToken.nonEmpty)
-    tables.toArray
+    val maxResults = 0
+    val pageToken = null
+    val response: ListTablesResponse = tablesApi.listTables(catalogName, schemaName, maxResults, pageToken)
+    response.getTables.toSeq.map(table => Identifier.of(namespace, table.getName)).toArray
   }
 
   override def loadTable(ident: Identifier): Table = {
@@ -587,7 +589,10 @@ private class UCProxy(
       case e: ApiException if e.getCode == 404 =>
         throw new NoSuchTableException(ident)
     }
+
     val identifier = TableIdentifier(t.getName, Some(t.getSchemaName), Some(t.getCatalogName))
+    val hasStorage = t.getStorageLocation != null
+
     val partitionCols = scala.collection.mutable.ArrayBuffer.empty[(String, Int)]
     val fields = t.getColumns.asScala.map { col =>
       Option(col.getPartitionIndex).foreach { index =>
@@ -596,69 +601,85 @@ private class UCProxy(
       StructField(col.getName, DataType.fromDDL(col.getTypeText), col.getNullable)
         .withComment(col.getComment)
     }.toArray
-    val locationUri = CatalogUtils.stringToURI(t.getStorageLocation)
-    val tableId = t.getTableId
-    var tableOp = TableOperation.READ_WRITE
-    val temporaryCredentials = {
-      try {
-        temporaryCredentialsApi
-          .generateTemporaryTableCredentials(
-            // TODO: at this time, we don't know if the table will be read or written. For now we always
-            //       request READ_WRITE credentials as the server doesn't distinguish between READ and
-            //       READ_WRITE credentials as of today. When loading a table, Spark should tell if it's
-            //       for read or write, we can request the proper credential after fixing Spark.
-            new GenerateTemporaryTableCredential().tableId(tableId).operation(tableOp)
-          )
-      }       catch {
-        case e: ApiException =>
-          logWarning(s"READ_WRITE credential generation failed for table $identifier: ${e.getMessage}")
-          try {
-            tableOp = TableOperation.READ
-            temporaryCredentialsApi
-              .generateTemporaryTableCredentials(
-                new GenerateTemporaryTableCredential().tableId(tableId).operation(tableOp)
-              )
-          } catch {
-            case e: ApiException =>
-              logWarning(s"READ credential generation failed for table $identifier: ${e.getMessage}")
-              if (serverSidePlanningEnabled) null else throw e
-          }
+
+    // Credential vending -- only for tables with storage
+    val (storage, extraProps) = if (hasStorage) {
+      val locationUri = CatalogUtils.stringToURI(t.getStorageLocation)
+      val tableId = t.getTableId
+      var tableOp = TableOperation.READ_WRITE
+      val temporaryCredentials = {
+        try {
+          temporaryCredentialsApi
+            .generateTemporaryTableCredentials(
+              // TODO: at this time, we don't know if the table will be read or written. For now we always
+              //       request READ_WRITE credentials as the server doesn't distinguish between READ and
+              //       READ_WRITE credentials as of today. When loading a table, Spark should tell if it's
+              //       for read or write, we can request the proper credential after fixing Spark.
+              new GenerateTemporaryTableCredential().tableId(tableId).operation(tableOp)
+            )
+        }       catch {
+          case e: ApiException =>
+            logWarning(s"READ_WRITE credential generation failed for table $identifier: ${e.getMessage}")
+            try {
+              tableOp = TableOperation.READ
+              temporaryCredentialsApi
+                .generateTemporaryTableCredentials(
+                  new GenerateTemporaryTableCredential().tableId(tableId).operation(tableOp)
+                )
+            } catch {
+              case e: ApiException =>
+                logWarning(s"READ credential generation failed for table $identifier: ${e.getMessage}")
+                if (serverSidePlanningEnabled) null else throw e
+            }
+        }
       }
-    }
 
-    if (serverSidePlanningEnabled && temporaryCredentials == null) {
-      enableServerSidePlanningConfig(identifier)
-    }
+      if (serverSidePlanningEnabled && temporaryCredentials == null) {
+        enableServerSidePlanningConfig(identifier)
+      }
 
-    val extraSerdeProps = if (temporaryCredentials == null) {
-      Map.empty[String, String].asJava
-    } else {
-      CredPropsUtil.createTableCredProps(
-        renewCredEnabled,
-        credScopedFsEnabled,
-        UCSingleCatalog.sessionHadoopFsImplProps(),
-        locationUri.getScheme,
-        uri.toString,
-        tokenProvider,
-        tableId,
-        tableOp,
-        temporaryCredentials,
+      val extraSerdeProps = if (temporaryCredentials == null) {
+        Map.empty[String, String].asJava
+      } else {
+        CredPropsUtil.createTableCredProps(
+          renewCredEnabled,
+          credScopedFsEnabled,
+          UCSingleCatalog.sessionHadoopFsImplProps(),
+          locationUri.getScheme,
+          uri.toString,
+          tokenProvider,
+          tableId,
+          tableOp,
+          temporaryCredentials,
+        )
+      }
+
+      val storageFormat = CatalogStorageFormat.empty.copy(
+        locationUri = Some(locationUri),
+        properties = t.getProperties.asScala.toMap ++ extraSerdeProps
       )
+      (storageFormat, Map.empty[String, String])
+    } else {
+      (CatalogStorageFormat.empty,
+        Option(t.getProperties).map(_.asScala.toMap).getOrElse(Map.empty))
+    }
+
+    // Table type mapping
+    val catalogTableType = t.getTableType match {
+      case TableType.MANAGED => CatalogTableType.MANAGED
+      case TableType.METRIC_VIEW => CatalogTableType.METRIC_VIEW
+      case _ => CatalogTableType.EXTERNAL
     }
 
     val sparkTable = CatalogTable(
       identifier,
-      tableType = if (t.getTableType == TableType.MANAGED) {
-        CatalogTableType.MANAGED
-      } else {
-        CatalogTableType.EXTERNAL
-      },
-      storage = CatalogStorageFormat.empty.copy(
-        locationUri = Some(locationUri),
-        properties = t.getProperties.asScala.toMap ++ extraSerdeProps
-      ),
+      tableType = catalogTableType,
+      storage = storage,
       schema = StructType(fields),
-      provider = Some(t.getDataSourceFormat.getValue.toLowerCase()),
+      provider = Option(t.getDataSourceFormat).map(_.getValue.toLowerCase()),
+      viewText = Option(t.getViewDefinition),
+      viewOriginalText = Option(t.getViewDefinition),
+      properties = extraProps,
       createTime = t.getCreatedAt,
       tracksPartitionsInCatalog = false,
       partitionColumnNames = partitionCols.sortBy(_._2).map(_._1).toSeq
@@ -672,33 +693,98 @@ private class UCProxy(
       .asInstanceOf[Table]
   }
 
+  override def createTable(
+      ident: Identifier,
+      tableInfo: org.apache.spark.sql.connector.catalog.TableInfo): Table = {
+    UCSingleCatalog.checkUnsupportedNestedNamespace(ident.namespace())
+    val properties = tableInfo.properties()
+    val ct = new CreateTable()
+    ct.setName(ident.name())
+    ct.setSchemaName(ident.namespace().head)
+    ct.setCatalogName(this.name)
+    Option(properties.get(TableCatalog.PROP_COMMENT)).foreach(ct.setComment(_))
+    val serverProps =
+      properties.view.filterKeys(!UCTableProperties.V2_TABLE_PROPERTIES.contains(_)).toMap
+    ct.setProperties(serverProps)
+
+    // Table type: use explicit tableType if provided, otherwise infer from properties
+    Option(tableInfo.tableType()) match {
+      case Some(tt) => ct.setTableType(TableType.fromValue(tt))
+      case None =>
+        val isManagedLocation = Option(properties.get(TableCatalog.PROP_IS_MANAGED_LOCATION))
+          .exists(_.equalsIgnoreCase("true"))
+        if (isManagedLocation) {
+          ct.setTableType(TableType.MANAGED)
+        } else {
+          ct.setTableType(TableType.EXTERNAL)
+        }
+    }
+
+    // Storage location (null for metric views and other view types)
+    Option(properties.get(TableCatalog.PROP_LOCATION)).foreach(ct.setStorageLocation(_))
+
+    // Data source format
+    Option(properties.get("provider")).foreach { format =>
+      ct.setDataSourceFormat(convertDatasourceFormat(format))
+    }
+
+    // Columns
+    val partitionColNames = extractPartitionColumnNames(tableInfo.partitions())
+    val columns: Seq[ColumnInfo] = tableInfo.columns().toSeq.zipWithIndex.map { case (col, i) =>
+      val column = new ColumnInfo()
+      column.setName(col.name())
+      column.setNullable(col.nullable())
+      column.setTypeText(col.dataType().catalogString)
+      column.setTypeName(convertDataTypeToTypeName(col.dataType()))
+      column.setTypeJson(col.dataType().json)
+      column.setPosition(i)
+      Option(col.comment()).foreach(column.setComment(_))
+      val partitionIdx = partitionColNames.indexWhere(_.equalsIgnoreCase(col.name()))
+      if (partitionIdx >= 0) column.setPartitionIndex(partitionIdx)
+      column
+    }
+    ct.setColumns(columns.asJava)
+
+    // View definition and dependencies (null for non-view tables)
+    Option(tableInfo.viewDefinition()).foreach(ct.setViewDefinition(_))
+    Option(tableInfo.viewDependencies()).foreach { sparkDepList =>
+      val ucDepList = new io.unitycatalog.client.model.DependencyList()
+      val ucDeps = sparkDepList.dependencies().map { dep =>
+        val ucDep = new io.unitycatalog.client.model.Dependency()
+        dep match {
+          case td: org.apache.spark.sql.connector.catalog.TableDependency =>
+            ucDep.setTable(
+              new io.unitycatalog.client.model.TableDependency()
+                .tableFullName(td.tableFullName()))
+          case _ =>
+        }
+        ucDep
+      }
+      ucDepList.setDependencies(java.util.Arrays.asList(ucDeps: _*))
+      ct.setViewDependencies(ucDepList)
+    }
+
+    tablesApi.createTable(ct)
+    loadTable(ident)
+  }
+
   override def createTable(ident: Identifier, schema: StructType, partitions: Array[Transform], properties: util.Map[String, String]): Table = {
     UCSingleCatalog.checkUnsupportedNestedNamespace(ident.namespace())
     UCSingleCatalog.requireProviderSpecified("CREATE TABLE", properties)
-
-    val createTable = new CreateTable()
-    createTable.setName(ident.name())
-    createTable.setSchemaName(ident.namespace().head)
-    createTable.setCatalogName(this.name)
-
-    val hasExternalClause = properties.containsKey(TableCatalog.PROP_EXTERNAL)
-    val storageLocation = properties.get(TableCatalog.PROP_LOCATION)
-    assert(storageLocation != null, "location should either be user specified or system generated.")
-    val isManagedLocation = Option(properties.get(TableCatalog.PROP_IS_MANAGED_LOCATION))
-      .exists(_.equalsIgnoreCase("true"))
-    val format = properties.get("provider")
-    if (isManagedLocation) {
-      assert(!hasExternalClause, "location is only generated for managed tables.")
-      if (!format.equalsIgnoreCase(DataSourceFormat.DELTA.name)) {
-        throw new ApiException("Unity Catalog does not support non-Delta managed table.")
-      }
-      createTable.setTableType(TableType.MANAGED)
-    } else {
-      createTable.setTableType(TableType.EXTERNAL)
+    val columns: Array[Column] = schema.fields.map { f =>
+      Column.create(f.name, f.dataType, f.nullable, f.getComment().orNull, null)
     }
-    createTable.setStorageLocation(storageLocation)
+    val tableInfo = new org.apache.spark.sql.connector.catalog.TableInfo.Builder()
+      .withColumns(columns)
+      .withPartitions(partitions)
+      .withProperties(properties)
+      .build()
+    createTable(ident, tableInfo)
+  }
 
-    val partitionColNames: Seq[String] = partitions.flatMap { t =>
+  private def extractPartitionColumnNames(partitions: Array[Transform]): Seq[String] = {
+    if (partitions == null) return Seq.empty
+    partitions.flatMap { t =>
       t.name() match {
         case "identity" =>
           val fieldNames = t.references().flatMap(_.fieldNames())
@@ -711,31 +797,6 @@ private class UCProxy(
           throw new ApiException(s"Unsupported partition transform: $other")
       }
     }.toSeq
-    val columns: Seq[ColumnInfo] = schema.fields.toSeq.zipWithIndex.map { case (field, i) =>
-      val column = new ColumnInfo()
-      column.setName(field.name)
-      if (field.getComment().isDefined) {
-        column.setComment(field.getComment.get)
-      }
-      column.setNullable(field.nullable)
-      column.setTypeText(field.dataType.catalogString)
-      column.setTypeName(convertDataTypeToTypeName(field.dataType))
-      column.setTypeJson(field.dataType.json)
-      column.setPosition(i)
-      val partitionIdx = partitionColNames.indexWhere(_.equalsIgnoreCase(field.name))
-      if (partitionIdx >= 0) column.setPartitionIndex(partitionIdx)
-      column
-    }
-    val comment = Option(properties.get(TableCatalog.PROP_COMMENT))
-    comment.foreach(createTable.setComment(_))
-    createTable.setColumns(columns)
-    createTable.setDataSourceFormat(convertDatasourceFormat(format))
-    // Do not send the V2 table properties as they are made part of the `createTable` already.
-    val propertiesToServer =
-      properties.view.filterKeys(!UCTableProperties.V2_TABLE_PROPERTIES.contains(_)).toMap
-    createTable.setProperties(propertiesToServer)
-    tablesApi.createTable(createTable)
-    loadTable(ident)
   }
 
   private def convertDatasourceFormat(format: String): DataSourceFormat = {
@@ -774,7 +835,6 @@ private class UCProxy(
       case _: MapType => ColumnTypeName.MAP
       case _: NullType => ColumnTypeName.NULL
       case _: UserDefinedType[_] => ColumnTypeName.USER_DEFINED_TYPE
-      case _: VariantType => ColumnTypeName.VARIANT
       case _ => ColumnTypeName.UNKNOWN_DEFAULT_OPEN_API
     }
   }
@@ -815,14 +875,9 @@ private class UCProxy(
   }
 
   override def listNamespaces(): Array[Array[String]] = {
-    val schemas = ArrayBuffer.empty[Array[String]]
-    var pageToken: String = null
-    do {
-      val response = schemasApi.listSchemas(name, /* limit */ 0, pageToken)
-      schemas ++= response.getSchemas.asScala.map(schema => Array(schema.getName))
-      pageToken = response.getNextPageToken
-    } while (pageToken != null && pageToken.nonEmpty)
-    schemas.toArray
+    schemasApi.listSchemas(name, 0, null).getSchemas.asScala.map { schema =>
+      Array(schema.getName)
+    }.toArray
   }
 
   override def listNamespaces(namespace: Array[String]): Array[Array[String]] = {
